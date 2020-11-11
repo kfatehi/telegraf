@@ -213,8 +213,7 @@ func (t *defTableManager) findExistingColumns(table string) (map[string]utils.Pg
 			log.Printf("E! Couldn't discover columns of table: %s\n%v", table, err)
 			return nil, err
 		}
-		pgShortType := utils.LongToShortPgType(colTypeStr)
-		cols[colName] = pgShortType
+		cols[colName] = utils.PgDataType(colTypeStr)
 	}
 	return cols, nil
 }

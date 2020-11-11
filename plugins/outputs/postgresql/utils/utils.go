@@ -67,16 +67,13 @@ func FullTableName(schema, name string) *pgx.Identifier {
 // their short and long versions.
 const (
 	PgBool                     = "boolean"
-	PgInt8                     = "int8"
-	PgInt4                     = "int4"
+	PgSmallInt                 = "smallint"
 	PgInteger                  = "integer"
 	PgBigInt                   = "bigint"
-	PgFloat8                   = "float8"
+	PgReal                     = "real"
 	PgDoublePrecision          = "double precision"
 	PgText                     = "text"
-	PgTimestamptz              = "timestamptz"
 	PgTimestampWithTimeZone    = "timestamp with time zone"
-	PgTimestamp                = "timestamp"
 	PgTimestampWithoutTimeZone = "timestamp without time zone"
 	PgSerial                   = "serial"
 	PgJSONb                    = "jsonb"
@@ -89,60 +86,44 @@ func DerivePgDatatype(value interface{}) PgDataType {
 	case bool:
 		return PgBool
 	case uint64, int64, int, uint:
-		return PgInt8
+		return PgBigInt
 	case uint32, int32:
-		return PgInt4
-	case float64, float32:
-		return PgFloat8
+		return PgInteger
+	case int16, int8:
+		return PgSmallInt
+	case float64:
+		return PgDoublePrecision
+	case float32:
+		return PgReal
 	case string:
 		return PgText
 	case time.Time:
-		return PgTimestamptz
+		return PgTimestampWithTimeZone
 	default:
 		log.Printf("E! Unknown datatype %T(%v)", value, value)
 		return PgText
 	}
 }
 
-// LongToShortPgType returns a PostgreSQL datatype in it's short
-// notation form.
-func LongToShortPgType(longPgType string) PgDataType {
-	switch longPgType {
-	case PgInteger:
-		return PgInt4
-	case PgBigInt:
-		return PgInt8
-	case PgDoublePrecision:
-		return PgFloat8
-	case PgTimestampWithTimeZone:
-		return PgTimestamptz
-	case PgTimestampWithoutTimeZone:
-		return PgTimestamp
-	default:
-		return PgDataType(longPgType)
-	}
-}
-
 // PgTypeCanContain tells you if one PostgreSQL data type can contain
 // the values of another without data loss.
 func PgTypeCanContain(canThis PgDataType, containThis PgDataType) bool {
-	if canThis == containThis {
+	switch canThis {
+	case containThis:
 		return true
+	case PgBigInt:
+		return containThis == PgInteger || containThis == PgSmallInt
+	case PgInteger:
+		return containThis == PgSmallInt
+	case PgDoublePrecision:
+		return containThis == PgReal || containThis == PgBigInt || containThis == PgInteger || containThis == PgSmallInt
+	case PgReal:
+		return containThis == PgBigInt || containThis == PgInteger || containThis == PgSmallInt
+	case PgTimestampWithTimeZone:
+		return containThis == PgTimestampWithoutTimeZone
+	default:
+		return false
 	}
-	if canThis == PgInt8 {
-		return containThis == PgInt4
-	}
-	if canThis == PgInt4 {
-		return containThis == PgSerial
-	}
-	if canThis == PgFloat8 {
-		return containThis == PgInt4
-	}
-	if canThis == PgTimestamptz {
-		return containThis == PgTimestamp
-	}
-
-	return false
 }
 
 // GenerateInsert returns a SQL statement to insert values in a table
