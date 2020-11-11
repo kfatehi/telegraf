@@ -13,15 +13,14 @@ import (
 )
 
 type Postgresql struct {
-	Connection                  string
-	Schema                      string
-	DoSchemaUpdates             bool
-	TagsAsForeignkeys           bool
-	CachedTagsetsPerMeasurement int
-	TagsAsJsonb                 bool
-	FieldsAsJsonb               bool
-	TableTemplate               string
-	TagTableSuffix              string
+	Connection        string
+	Schema            string
+	DoSchemaUpdates   bool
+	TagsAsForeignkeys bool
+	TagsAsJsonb       bool
+	FieldsAsJsonb     bool
+	TableTemplate     string
+	TagTableSuffix    string
 
 	// lock for the assignment of the dbWrapper,
 	// table manager and tags cache
@@ -42,11 +41,10 @@ const createTableTemplate = "CREATE TABLE IF NOT EXISTS {TABLE}({COLUMNS})"
 
 func newPostgresql() *Postgresql {
 	return &Postgresql{
-		Schema:                      "public",
-		TableTemplate:               createTableTemplate,
-		TagTableSuffix:              "_tag",
-		CachedTagsetsPerMeasurement: 1000,
-		DoSchemaUpdates:             true,
+		Schema:          "public",
+		TableTemplate:   createTableTemplate,
+		TagTableSuffix:  "_tag",
+		DoSchemaUpdates: true,
 	}
 }
 
@@ -62,12 +60,11 @@ func (p *Postgresql) Connect() error {
 	}
 	p.db = db
 	p.tables = tables.NewManager(p.db, p.Schema, p.TableTemplate)
-
 	if p.TagsAsForeignkeys {
-		p.tagCache = newTagsCache(p.CachedTagsetsPerMeasurement, p.TagsAsJsonb, p.TagTableSuffix, p.Schema, p.db)
 		p.tagTables = tables.NewManager(p.db, p.Schema, createTableTemplate)
 	}
-	p.rows = newRowTransformer(p.TagsAsForeignkeys, p.TagsAsJsonb, p.FieldsAsJsonb, p.tagCache)
+
+	p.rows = newRowTransformer(p.TagsAsForeignkeys, p.TagsAsJsonb, p.FieldsAsJsonb)
 	p.columns = columns.NewMapper(p.TagsAsForeignkeys, p.TagsAsJsonb, p.FieldsAsJsonb)
 	return nil
 }
@@ -76,7 +73,6 @@ func (p *Postgresql) Connect() error {
 func (p *Postgresql) Close() error {
 	p.dbConnLock.Lock()
 	defer p.dbConnLock.Unlock()
-	p.tagCache = nil
 	p.tables = nil
 	return p.db.Close()
 }
@@ -104,11 +100,6 @@ var sampleConfig = `
 
   ## Store tags as foreign keys in the metrics table. Default is false.
   # tags_as_foreignkeys = false
-  
-  ## If tags_as_foreignkeys is set to true you can choose the number of tag sets to cache
-  ## per measurement (metric name). Default is 1000, if set to 0 => cache has no limit.
-  ## Has no effect if tags_as_foreignkeys = false
-  # cached_tagsets_per_measurement = 1000
 
   ## Template to use for generating tables
   ## Available Variables:
@@ -168,7 +159,7 @@ func (p *Postgresql) writeMetricsFromMeasure(measureName string, metricIndices [
 			return err
 		}
 		if p.TagsAsForeignkeys {
-			tagTableName := p.tagCache.tagsTableName(measureName)
+			tagTableName := measureName + p.TagTableSuffix
 			if err := p.prepareTable(p.tagTables, tagTableName, targetTagColumns); err != nil {
 				return err
 			}
@@ -220,8 +211,5 @@ func (p *Postgresql) resetConnection() error {
 	var err error
 	p.db, err = db.NewWrapper(p.Connection)
 	p.tables.SetConnection(p.db)
-	if p.tagCache != nil {
-		p.tagCache.setDb(p.db)
-	}
 	return err
 }

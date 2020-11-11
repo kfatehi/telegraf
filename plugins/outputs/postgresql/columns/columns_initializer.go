@@ -54,7 +54,7 @@ func tagsAsFKAndJSONAndFieldsAsJSONInit() (*utils.TargetColumns, *utils.TargetCo
 			Roles:     []utils.ColumnRole{utils.TimeColType, utils.TagsIDColType, utils.FieldColType},
 		}, &utils.TargetColumns{
 			Names:     []string{TagIDColumnName, TagsJSONColumn},
-			DataTypes: []utils.PgDataType{TagIDColumnDataTypeAsPK, JSONColumnDataType},
+			DataTypes: []utils.PgDataType{TagIDColumnDataType, JSONColumnDataType},
 			Target:    map[string]int{TagIDColumnName: 0, TagsJSONColumn: 1},
 			Roles:     []utils.ColumnRole{utils.TagsIDColType, utils.TagColType},
 		}
@@ -68,7 +68,7 @@ func tagsAsFKAndJSONInit() (*utils.TargetColumns, *utils.TargetColumns) {
 			Roles:     []utils.ColumnRole{utils.TimeColType, utils.TagsIDColType},
 		}, &utils.TargetColumns{
 			Names:     []string{TagIDColumnName, TagsJSONColumn},
-			DataTypes: []utils.PgDataType{TagIDColumnDataTypeAsPK, JSONColumnDataType},
+			DataTypes: []utils.PgDataType{TagIDColumnDataType, JSONColumnDataType},
 			Target:    map[string]int{TagIDColumnName: 0, TagsJSONColumn: 1},
 			Roles:     []utils.ColumnRole{utils.TagsIDColType, utils.FieldColType},
 		}
@@ -82,7 +82,7 @@ func tagsAsFKFieldsAsJSONInit() (*utils.TargetColumns, *utils.TargetColumns) {
 			Roles:     []utils.ColumnRole{utils.TimeColType, utils.TagsIDColType, utils.FieldColType},
 		}, &utils.TargetColumns{
 			Names:     []string{TagIDColumnName},
-			DataTypes: []utils.PgDataType{TagIDColumnDataTypeAsPK},
+			DataTypes: []utils.PgDataType{TagIDColumnDataType},
 			Target:    map[string]int{TagIDColumnName: 0},
 			Roles:     []utils.ColumnRole{utils.TagsIDColType},
 		}
@@ -96,7 +96,7 @@ func tagsAsFKInit() (*utils.TargetColumns, *utils.TargetColumns) {
 			Roles:     []utils.ColumnRole{utils.TimeColType, utils.TagsIDColType},
 		}, &utils.TargetColumns{
 			Names:     []string{TagIDColumnName},
-			DataTypes: []utils.PgDataType{TagIDColumnDataTypeAsPK},
+			DataTypes: []utils.PgDataType{TagIDColumnDataType},
 			Target:    map[string]int{TagIDColumnName: 0},
 			Roles:     []utils.ColumnRole{utils.TagsIDColType},
 		}

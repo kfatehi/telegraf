@@ -8,8 +8,7 @@ const (
 	TimeColumnDataType      = utils.PgTimestamptz
 	TimeColumnDefinition    = TimeColumnName + " " + utils.PgTimestamptz
 	TagIDColumnName         = "tag_id"
-	TagIDColumnDataType     = utils.PgInt4
-	TagIDColumnDataTypeAsPK = utils.PgSerial
+	TagIDColumnDataType     = utils.PgBigInt
 	TagsJSONColumn          = "tags"
 	FieldsJSONColumn        = "fields"
 	JSONColumnDataType      = utils.PgJSONb

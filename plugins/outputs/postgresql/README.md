@@ -29,10 +29,6 @@ target schema.
 
     ## Store tags as foreign keys in the metrics table. Default is false.
     # tags_as_foreignkeys = false
-  
-    ## If tags_as_foreignkeys is set to true you can choose the number of tag sets to cache
-    ## per measurement (metric name). Default is 1000, if set to 0 => cache has no limit.
-    # cached_tagsets_per_measurement = 1000
 
     ## Template to use for generating tables
     ## Available Variables:

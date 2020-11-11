@@ -6,6 +6,7 @@ import (
 	"log"
 	"strings"
 	"time"
+	"hash/maphash"
 
 	"github.com/influxdata/telegraf"
 	"github.com/jackc/pgx"
@@ -157,4 +158,16 @@ func GenerateInsert(fullSanitizedTableName string, columns []string) string {
 	columnNames := strings.Join(quotedColumns, ",")
 	values := strings.Join(valuePlaceholders, ",")
 	return fmt.Sprintf(insertIntoSQLTemplate, fullSanitizedTableName, columnNames, values)
+}
+
+func GetTagID(metric telegraf.Metric) int64 {
+	var hash maphash.Hash
+	for _, tag := range metric.TagList() {
+		_, _ = hash.WriteString(tag.Key)
+		_ = hash.WriteByte(0)
+		_, _ = hash.WriteString(tag.Value)
+		_ = hash.WriteByte(0)
+	}
+	// Convert to int64 as postgres does not support uint64
+	return int64(hash.Sum64())
 }

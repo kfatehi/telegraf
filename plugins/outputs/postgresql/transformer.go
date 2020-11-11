@@ -14,15 +14,13 @@ type defTransformer struct {
 	tagsAsFK      bool
 	tagsAsJSONb   bool
 	fieldsAsJSONb bool
-	tagsCache     tagsCache
 }
 
-func newRowTransformer(tagsAsFK, tagsAsJSONb, fieldsAsJSONb bool, tagsCache tagsCache) transformer {
+func newRowTransformer(tagsAsFK, tagsAsJSONb, fieldsAsJSONb bool) transformer {
 	return &defTransformer{
 		tagsAsFK:      tagsAsFK,
 		tagsAsJSONb:   tagsAsJSONb,
 		fieldsAsJSONb: fieldsAsJSONb,
-		tagsCache:     tagsCache,
 	}
 }
 
@@ -32,11 +30,7 @@ func (dt *defTransformer) createRowFromMetric(numColumns int, metric telegraf.Me
 	row[0] = metric.Time()
 	// handle tags and tag id
 	if dt.tagsAsFK {
-		tagID, err := dt.tagsCache.getTagID(targetTagColumns, metric)
-		if err != nil {
-			return nil, err
-		}
-		row[1] = tagID
+		row[1] = utils.GetTagID(metric)
 	} else {
 		if dt.tagsAsJSONb {
 			jsonVal, err := utils.BuildJsonb(metric.Tags())
