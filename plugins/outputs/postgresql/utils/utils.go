@@ -3,13 +3,13 @@ package utils
 import (
 	"encoding/json"
 	"fmt"
+	"hash/maphash"
 	"log"
 	"strings"
 	"time"
-	"hash/maphash"
 
 	"github.com/influxdata/telegraf"
-	"github.com/jackc/pgx"
+	"github.com/jackc/pgx/v4"
 )
 
 const (
@@ -55,12 +55,12 @@ func QuoteLiteral(name string) string {
 }
 
 // FullTableName returns a sanitized table name with it's schema (if supplied)
-func FullTableName(schema, name string) *pgx.Identifier {
+func FullTableName(schema, name string) pgx.Identifier {
 	if schema != "" {
-		return &pgx.Identifier{schema, name}
+		return pgx.Identifier{schema, name}
 	}
 
-	return &pgx.Identifier{name}
+	return pgx.Identifier{name}
 }
 
 // Constants for naming PostgreSQL data types both in

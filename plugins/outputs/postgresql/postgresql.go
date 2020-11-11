@@ -1,13 +1,15 @@
 package postgresql
 
 import (
+	"context"
 	"log"
-	"sync"
+
+	"github.com/jackc/pgx/v4"
+	"github.com/jackc/pgx/v4/pgxpool"
 
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/plugins/outputs"
 	"github.com/influxdata/telegraf/plugins/outputs/postgresql/columns"
-	"github.com/influxdata/telegraf/plugins/outputs/postgresql/db"
 	"github.com/influxdata/telegraf/plugins/outputs/postgresql/tables"
 	"github.com/influxdata/telegraf/plugins/outputs/postgresql/utils"
 )
@@ -21,13 +23,13 @@ type Postgresql struct {
 	FieldsAsJsonb     bool
 	TableTemplate     string
 	TagTableSuffix    string
+	PoolSize          int
 
-	// lock for the assignment of the dbWrapper,
-	// table manager and tags cache
-	dbConnLock sync.Mutex
-	db         db.Wrapper
-	tables     tables.Manager
-	tagTables  tables.Manager
+	dbContext       context.Context
+	dbContextCancel func()
+	db              *pgxpool.Pool
+	tables          tables.Manager
+	tagTables       tables.Manager
 
 	rows    transformer
 	columns columns.Mapper
@@ -50,15 +52,20 @@ func newPostgresql() *Postgresql {
 
 // Connect establishes a connection to the target database and prepares the cache
 func (p *Postgresql) Connect() error {
-	p.dbConnLock.Lock()
-	defer p.dbConnLock.Unlock()
-
-	// set p.db with a lock
-	db, err := db.NewWrapper(p.Connection)
+	poolConfig, err := pgxpool.ParseConfig(p.Connection)
 	if err != nil {
 		return err
 	}
-	p.db = db
+
+	poolConfig.AfterConnect = p.dbConnectedHook
+
+	// Yes, we're not supposed to store the context. However since we don't receive a context, we have to.
+	p.dbContext, p.dbContextCancel = context.WithCancel(context.Background())
+	p.db, err = pgxpool.ConnectConfig(p.dbContext, poolConfig)
+	if err != nil {
+		log.Printf("E! Couldn't connect to server\n%v", err)
+		return err
+	}
 	p.tables = tables.NewManager(p.db, p.Schema, p.TableTemplate)
 	if p.TagsAsForeignkeys {
 		p.tagTables = tables.NewManager(p.db, p.Schema, createTableTemplate)
@@ -69,12 +76,33 @@ func (p *Postgresql) Connect() error {
 	return nil
 }
 
+// dbConnectHook checks to see whether we lost all connections, and if so resets any known state of the database (e.g. cached tables).
+func (p *Postgresql) dbConnectedHook(ctx context.Context, conn *pgx.Conn) error {
+	if p.db == nil || p.tables == nil {
+		// This will happen on the initial connect since we haven't set it yet.
+		// Also meaning there is no state to reset.
+		return nil
+	}
+
+	stat := p.db.Stat()
+	if stat.AcquiredConns()+stat.IdleConns() > 0 {
+		return nil
+	}
+
+	p.tables.ClearTableCache()
+	if p.tagTables != nil {
+		p.tagTables.ClearTableCache()
+	}
+
+	return nil
+}
+
 // Close closes the connection to the database
 func (p *Postgresql) Close() error {
-	p.dbConnLock.Lock()
-	defer p.dbConnLock.Unlock()
 	p.tables = nil
-	return p.db.Close()
+	p.dbContextCancel()
+	p.db.Close()
+	return nil
 }
 
 var sampleConfig = `
@@ -128,17 +156,9 @@ func (p *Postgresql) SampleConfig() string { return sampleConfig }
 func (p *Postgresql) Description() string  { return "Send metrics to PostgreSQL" }
 
 func (p *Postgresql) Write(metrics []telegraf.Metric) error {
-	if !p.checkConnection() {
-		log.Println("W! Connection is not alive, attempting reset")
-		if err := p.resetConnection(); err != nil {
-			log.Printf("E! Could not reset connection:\n%v", err)
-			return err
-		}
-		log.Println("I! Connection established again")
-	}
 	metricsByMeasurement := utils.GroupMetricsByMeasurement(metrics)
 	for measureName, indices := range metricsByMeasurement {
-		err := p.writeMetricsFromMeasure(measureName, indices, metrics)
+		err := p.writeMetricsFromMeasure(p.dbContext, measureName, indices, metrics)
 		if err != nil {
 			log.Printf("copy error: %v", err)
 			return err
@@ -151,16 +171,16 @@ func (p *Postgresql) Write(metrics []telegraf.Metric) error {
 // of the metrics that belong to the selected 'measureName' for faster lookup.
 // If schema updates are enabled the target db tables are updated to be able
 // to hold the new values.
-func (p *Postgresql) writeMetricsFromMeasure(measureName string, metricIndices []int, metrics []telegraf.Metric) error {
+func (p *Postgresql) writeMetricsFromMeasure(ctx context.Context, measureName string, metricIndices []int, metrics []telegraf.Metric) error {
 	targetColumns, targetTagColumns := p.columns.Target(metricIndices, metrics)
 
 	if p.DoSchemaUpdates {
-		if err := p.prepareTable(p.tables, measureName, targetColumns); err != nil {
+		if err := p.prepareTable(ctx, p.tables, measureName, targetColumns); err != nil {
 			return err
 		}
 		if p.TagsAsForeignkeys {
 			tagTableName := measureName + p.TagTableSuffix
-			if err := p.prepareTable(p.tagTables, tagTableName, targetTagColumns); err != nil {
+			if err := p.prepareTable(ctx, p.tagTables, tagTableName, targetTagColumns); err != nil {
 				return err
 			}
 		}
@@ -177,39 +197,25 @@ func (p *Postgresql) writeMetricsFromMeasure(measureName string, metricIndices [
 	}
 
 	fullTableName := utils.FullTableName(p.Schema, measureName)
-	return p.db.DoCopy(fullTableName, targetColumns.Names, values)
+	_, err := p.db.CopyFrom(ctx, fullTableName, targetColumns.Names, pgx.CopyFromRows(values))
+	return err
 }
 
 // Checks if a table exists in the db, and then validates if all the required columns
 // are present or some are missing (if metrics changed their field or tag sets).
-func (p *Postgresql) prepareTable(tableManager tables.Manager, tableName string, details *utils.TargetColumns) error {
-	tableExists := tableManager.Exists(tableName)
+func (p *Postgresql) prepareTable(ctx context.Context, tableManager tables.Manager, tableName string, details *utils.TargetColumns) error {
+	tableExists := tableManager.Exists(ctx, tableName)
 
 	if !tableExists {
-		return tableManager.CreateTable(tableName, details)
+		return tableManager.CreateTable(ctx, tableName, details)
 	}
 
-	missingColumns, err := tableManager.FindColumnMismatch(tableName, details)
+	missingColumns, err := tableManager.FindColumnMismatch(ctx, tableName, details)
 	if err != nil {
 		return err
 	}
 	if len(missingColumns) == 0 {
 		return nil
 	}
-	return tableManager.AddColumnsToTable(tableName, missingColumns, details)
-}
-
-func (p *Postgresql) checkConnection() bool {
-	p.dbConnLock.Lock()
-	defer p.dbConnLock.Unlock()
-	return p.db != nil && p.db.IsAlive()
-}
-
-func (p *Postgresql) resetConnection() error {
-	p.dbConnLock.Lock()
-	defer p.dbConnLock.Unlock()
-	var err error
-	p.db, err = db.NewWrapper(p.Connection)
-	p.tables.SetConnection(p.db)
-	return err
+	return tableManager.AddColumnsToTable(ctx, tableName, missingColumns, details)
 }
