@@ -28,7 +28,7 @@ type Postgresql struct {
 	dbConnLock sync.Mutex
 	db         db.Wrapper
 	tables     tables.Manager
-	tagCache   tagsCache
+	tagTables  tables.Manager
 
 	rows    transformer
 	columns columns.Mapper
@@ -38,10 +38,12 @@ func init() {
 	outputs.Add("postgresql", func() telegraf.Output { return newPostgresql() })
 }
 
+const createTableTemplate = "CREATE TABLE IF NOT EXISTS {TABLE}({COLUMNS})"
+
 func newPostgresql() *Postgresql {
 	return &Postgresql{
 		Schema:                      "public",
-		TableTemplate:               "CREATE TABLE IF NOT EXISTS {TABLE}({COLUMNS})",
+		TableTemplate:               createTableTemplate,
 		TagTableSuffix:              "_tag",
 		CachedTagsetsPerMeasurement: 1000,
 		DoSchemaUpdates:             true,
@@ -63,6 +65,7 @@ func (p *Postgresql) Connect() error {
 
 	if p.TagsAsForeignkeys {
 		p.tagCache = newTagsCache(p.CachedTagsetsPerMeasurement, p.TagsAsJsonb, p.TagTableSuffix, p.Schema, p.db)
+		p.tagTables = tables.NewManager(p.db, p.Schema, createTableTemplate)
 	}
 	p.rows = newRowTransformer(p.TagsAsForeignkeys, p.TagsAsJsonb, p.FieldsAsJsonb, p.tagCache)
 	p.columns = columns.NewMapper(p.TagsAsForeignkeys, p.TagsAsJsonb, p.FieldsAsJsonb)
@@ -161,12 +164,12 @@ func (p *Postgresql) writeMetricsFromMeasure(measureName string, metricIndices [
 	targetColumns, targetTagColumns := p.columns.Target(metricIndices, metrics)
 
 	if p.DoSchemaUpdates {
-		if err := p.prepareTable(measureName, targetColumns); err != nil {
+		if err := p.prepareTable(p.tables, measureName, targetColumns); err != nil {
 			return err
 		}
 		if p.TagsAsForeignkeys {
 			tagTableName := p.tagCache.tagsTableName(measureName)
-			if err := p.prepareTable(tagTableName, targetTagColumns); err != nil {
+			if err := p.prepareTable(p.tagTables, tagTableName, targetTagColumns); err != nil {
 				return err
 			}
 		}
@@ -188,21 +191,21 @@ func (p *Postgresql) writeMetricsFromMeasure(measureName string, metricIndices [
 
 // Checks if a table exists in the db, and then validates if all the required columns
 // are present or some are missing (if metrics changed their field or tag sets).
-func (p *Postgresql) prepareTable(tableName string, details *utils.TargetColumns) error {
-	tableExists := p.tables.Exists(tableName)
+func (p *Postgresql) prepareTable(tableManager tables.Manager, tableName string, details *utils.TargetColumns) error {
+	tableExists := tableManager.Exists(tableName)
 
 	if !tableExists {
-		return p.tables.CreateTable(tableName, details)
+		return tableManager.CreateTable(tableName, details)
 	}
 
-	missingColumns, err := p.tables.FindColumnMismatch(tableName, details)
+	missingColumns, err := tableManager.FindColumnMismatch(tableName, details)
 	if err != nil {
 		return err
 	}
 	if len(missingColumns) == 0 {
 		return nil
 	}
-	return p.tables.AddColumnsToTable(tableName, missingColumns, details)
+	return tableManager.AddColumnsToTable(tableName, missingColumns, details)
 }
 
 func (p *Postgresql) checkConnection() bool {
