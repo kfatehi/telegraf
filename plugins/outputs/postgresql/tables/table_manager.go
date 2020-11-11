@@ -89,6 +89,7 @@ func (t *defTableManager) Exists(tableName string) bool {
 
 // Creates a table in the database with the column names and types specified in 'colDetails'
 func (t *defTableManager) CreateTable(tableName string, colDetails *utils.TargetColumns) error {
+	colDetails.Sort()
 	sql := t.generateCreateTableSQL(tableName, colDetails)
 	if _, err := t.db.Exec(sql); err != nil {
 		log.Printf("E! Couldn't create table: %s\nSQL: %s\n%v", tableName, sql, err)
