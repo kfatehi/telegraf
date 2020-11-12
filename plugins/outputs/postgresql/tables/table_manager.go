@@ -13,7 +13,6 @@ import (
 
 const (
 	addColumnTemplate           = "ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s %s;"
-	tableExistsTemplate         = "SELECT tablename FROM pg_tables WHERE tablename = $1 AND schemaname = $2;"
 	findExistingColumnsTemplate = "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = $1 and table_name = $2"
 )
 
@@ -22,29 +21,8 @@ type columnInDbDef struct {
 	exists   bool
 }
 
-// Manager defines an abstraction that can check the state of tables in a PG
-// database, create, and update them.
-type Manager interface {
-	// Exists checks if a table with the given name already is present in the DB.
-	Exists(ctx context.Context, tableName string) bool
-	// Creates a table in the database with the column names and types specified in 'colDetails'
-	CreateTable(ctx context.Context, tableName string, colDetails *utils.TargetColumns) error
-	// This function queries a table in the DB if the required columns in 'colDetails' are present and what is their
-	// data type. For existing columns it checks if the data type in the DB can safely hold the data from the metrics.
-	// It returns:
-	//   - the indices of the missing columns (from colDetails)
-	//   - or an error if
-	//     = it couldn't discover the columns of the table in the db
-	//     = the existing column types are incompatible with the required column types
-	FindColumnMismatch(ctx context.Context, tableName string, colDetails *utils.TargetColumns) ([]int, error)
-	// From the column details (colDetails) of a given measurement, 'columnIndices' specifies which are missing in the DB.
-	// this function will add the new columns with the required data type.
-	AddColumnsToTable(ctx context.Context, tableName string, columnIndices []int, colDetails *utils.TargetColumns) error
-	ClearTableCache()
-}
-
-type defTableManager struct {
-	Tables        map[string]bool
+type TableManager struct {
+	Tables        map[string]map[string]utils.PgDataType
 	db            *pgxpool.Pool
 	schema        string
 	tableTemplate string
@@ -52,96 +30,53 @@ type defTableManager struct {
 
 // NewManager returns an instance of the tables.Manager interface
 // that can handle checking and updating the state of tables in the PG database.
-func NewManager(db *pgxpool.Pool, schema, tableTemplate string) Manager {
-	return &defTableManager{
-		Tables:        make(map[string]bool),
+func NewManager(db *pgxpool.Pool, schema, tableTemplate string) *TableManager {
+	return &TableManager{
+		Tables:        make(map[string]map[string]utils.PgDataType),
 		db:            db,
 		tableTemplate: tableTemplate,
 		schema:        schema,
 	}
 }
 
-// ClearTableCache clear the local cache of which table exists.
-func (t *defTableManager) ClearTableCache() {
-	t.Tables = make(map[string]bool)
-}
-
-// Exists checks if a table with the given name already is present in the DB.
-func (t *defTableManager) Exists(ctx context.Context, tableName string) bool {
-	if _, ok := t.Tables[tableName]; ok {
-		return true
-	}
-
-	commandTag, err := t.db.Exec(ctx, tableExistsTemplate, tableName, t.schema)
-	if err != nil {
-		log.Printf("E! Error checking for existence of metric table: %s\nSQL: %s\n%v", tableName, tableExistsTemplate, err)
-		return false
-	}
-
-	if commandTag.RowsAffected() == 1 {
-		t.Tables[tableName] = true
-		return true
-	}
-
-	return false
+// ClearTableCache clear the table structure cache.
+func (tm *TableManager) ClearTableCache() {
+	tm.Tables = make(map[string]map[string]utils.PgDataType)
 }
 
 // Creates a table in the database with the column names and types specified in 'colDetails'
-func (t *defTableManager) CreateTable(ctx context.Context, tableName string, colDetails *utils.TargetColumns) error {
+func (tm *TableManager) createTable(ctx context.Context, tableName string, colDetails *utils.TargetColumns) error {
 	colDetails.Sort()
-	sql := t.generateCreateTableSQL(tableName, colDetails)
-	if _, err := t.db.Exec(ctx, sql); err != nil {
-		log.Printf("E! Couldn't create table: %s\nSQL: %s\n%v", tableName, sql, err)
+	sql := tm.generateCreateTableSQL(tableName, colDetails)
+	if _, err := tm.db.Exec(ctx, sql); err != nil {
 		return err
 	}
 
-	t.Tables[tableName] = true
+	columns := make(map[string]utils.PgDataType, len(colDetails.Names))
+	for i, colName := range colDetails.Names {
+		columns[colName] = colDetails.DataTypes[i]
+	}
+
+	tm.Tables[tableName] = columns
 	return nil
 }
 
-// This function queries a table in the DB if the required columns in 'colDetails' are present and what is their
-// data type. For existing columns it checks if the data type in the DB can safely hold the data from the metrics.
-// It returns:
-//   - the indices of the missing columns (from colDetails)
-//   - or an error if
-//     = it couldn't discover the columns of the table in the db
-//     = the existing column types are incompatible with the required column types
-func (t *defTableManager) FindColumnMismatch(ctx context.Context, tableName string, colDetails *utils.TargetColumns) ([]int, error) {
-	columnPresence, err := t.findColumnPresence(ctx, tableName, colDetails.Names)
-	if err != nil {
-		return nil, err
-	}
-
-	var missingCols []int
-	for colIndex := range colDetails.Names {
-		colStateInDb := columnPresence[colIndex]
-		if !colStateInDb.exists {
-			missingCols = append(missingCols, colIndex)
-			continue
-		}
-		typeInDb := colStateInDb.dataType
-		typeInMetric := colDetails.DataTypes[colIndex]
-		if !utils.PgTypeCanContain(typeInDb, typeInMetric) {
-			return nil, fmt.Errorf("E! A column exists in '%s' of type '%s' required type '%s'", tableName, typeInDb, typeInMetric)
-		}
-	}
-
-	return missingCols, nil
-}
-
-// From the column details (colDetails) of a given measurement, 'columnIndices' specifies which are missing in the DB.
-// this function will add the new columns with the required data type.
-func (t *defTableManager) AddColumnsToTable(ctx context.Context, tableName string, columnIndices []int, colDetails *utils.TargetColumns) error {
-	fullTableName := utils.FullTableName(t.schema, tableName).Sanitize()
+// addColumnsToTable adds the indicated columns to the table in the database.
+// This is an idempotent operation, so attempting to add a column which already exists is a silent no-op.
+func (tm *TableManager) addColumnsToTable(ctx context.Context, tableName string, columnIndices []int, colDetails *utils.TargetColumns) error {
+	fullTableName := utils.FullTableName(tm.schema, tableName).Sanitize()
 	for _, colIndex := range columnIndices {
 		name := colDetails.Names[colIndex]
 		dataType := colDetails.DataTypes[colIndex]
 		addColumnQuery := fmt.Sprintf(addColumnTemplate, fullTableName, utils.QuoteIdent(name), dataType)
-		_, err := t.db.Exec(ctx, addColumnQuery)
+		_, err := tm.db.Exec(ctx, addColumnQuery)
 		if err != nil {
-			log.Printf("E! Couldn't add missing columns to the table: %s\nError executing: %s\n%v", tableName, addColumnQuery, err)
-			return err
+			return fmt.Errorf("adding '%s': %w", name, err)
 		}
+
+		//FIXME if the column exists, but is a different type, we won't get an error, but we need to ensure the type is one
+		// we can use, and not just assume it's correct.
+		tm.Tables[tableName][name] = dataType
 	}
 
 	return nil
@@ -150,7 +85,7 @@ func (t *defTableManager) AddColumnsToTable(ctx context.Context, tableName strin
 // Populate the 'tableTemplate' (supplied as config option to the plugin) with the details of
 // the required columns for the measurement to create a 'CREATE TABLE' SQL statement.
 // The order, column names and data types are given in 'colDetails'.
-func (t *defTableManager) generateCreateTableSQL(tableName string, colDetails *utils.TargetColumns) string {
+func (tm *TableManager) generateCreateTableSQL(tableName string, colDetails *utils.TargetColumns) string {
 	colDefs := make([]string, len(colDetails.Names))
 	var pk []string
 	for colIndex, colName := range colDetails.Names {
@@ -160,8 +95,8 @@ func (t *defTableManager) generateCreateTableSQL(tableName string, colDetails *u
 		}
 	}
 
-	fullTableName := utils.FullTableName(t.schema, tableName).Sanitize()
-	query := strings.Replace(t.tableTemplate, "{TABLE}", fullTableName, -1)
+	fullTableName := utils.FullTableName(tm.schema, tableName).Sanitize()
+	query := strings.Replace(tm.tableTemplate, "{TABLE}", fullTableName, -1)
 	query = strings.Replace(query, "{TABLELITERAL}", utils.QuoteLiteral(fullTableName), -1)
 	query = strings.Replace(query, "{COLUMNS}", strings.Join(colDefs, ","), -1)
 	query = strings.Replace(query, "{KEY_COLUMNS}", strings.Join(pk, ","), -1)
@@ -169,39 +104,11 @@ func (t *defTableManager) generateCreateTableSQL(tableName string, colDetails *u
 	return query
 }
 
-// For a given table and an array of column names it checks the database if those columns exist,
-// and what's their data type.
-func (t *defTableManager) findColumnPresence(ctx context.Context, tableName string, columns []string) ([]*columnInDbDef, error) {
-	existingCols, err := t.findExistingColumns(ctx, tableName)
+func (tm *TableManager) refreshTableStructure(ctx context.Context, tableName string) error {
+	rows, err := tm.db.Query(ctx, findExistingColumnsTemplate, tm.schema, tableName)
 	if err != nil {
-		return nil, err
-	}
-	if len(existingCols) == 0 {
-		log.Printf("E! Table exists, but no columns discovered, user doesn't have enough permissions")
-		return nil, errors.New("Table exists, but no columns discovered, user doesn't have enough permissions")
-	}
-
-	columnStatus := make([]*columnInDbDef, len(columns))
-	for i := 0; i < len(columns); i++ {
-		currentColumn := columns[i]
-		colType, exists := existingCols[currentColumn]
-		if !exists {
-			colType = ""
-		}
-		columnStatus[i] = &columnInDbDef{
-			exists:   exists,
-			dataType: colType,
-		}
-	}
-
-	return columnStatus, nil
-}
-
-func (t *defTableManager) findExistingColumns(ctx context.Context, table string) (map[string]utils.PgDataType, error) {
-	rows, err := t.db.Query(ctx, findExistingColumnsTemplate, t.schema, table)
-	if err != nil {
-		log.Printf("E! Couldn't discover existing columns of table: %s\n%v", table, err)
-		return nil, errors.Wrap(err, "could not discover existing columns")
+		log.Printf("E! Couldn't discover existing columns of table: %s\n%v", tableName, err)
+		return errors.Wrap(err, "could not discover existing columns")
 	}
 	defer rows.Close()
 	cols := make(map[string]utils.PgDataType)
@@ -209,10 +116,58 @@ func (t *defTableManager) findExistingColumns(ctx context.Context, table string)
 		var colName, colTypeStr string
 		err := rows.Scan(&colName, &colTypeStr)
 		if err != nil {
-			log.Printf("E! Couldn't discover columns of table: %s\n%v", table, err)
-			return nil, err
+			log.Printf("E! Couldn't discover columns of table: %s\n%v", tableName, err)
+			return err
 		}
 		cols[colName] = utils.PgDataType(colTypeStr)
 	}
-	return cols, nil
+
+	tm.Tables[tableName] = cols
+	return nil
+}
+
+func (tm *TableManager) EnsureStructure(ctx context.Context, tableName string, columns *utils.TargetColumns) error {
+	structure, ok := tm.Tables[tableName]
+	if !ok {
+		// We don't know about the table. First try to query it.
+		if err := tm.refreshTableStructure(ctx, tableName); err != nil {
+			return fmt.Errorf("querying table structure: %w", err)
+		}
+		structure, ok = tm.Tables[tableName]
+		if !ok {
+			// Ok, table doesn't exist, now we can create it.
+			if err := tm.createTable(ctx, tableName, columns); err != nil {
+				return fmt.Errorf("creating table: %w", err)
+			}
+			structure = tm.Tables[tableName]
+		}
+	}
+
+	missingColumns, err := tm.checkColumns(structure, columns)
+	if err != nil {
+		return fmt.Errorf("column validation: %w", err)
+	}
+	if len(missingColumns) == 0 {
+		return nil
+	}
+
+	if err := tm.addColumnsToTable(ctx, tableName, missingColumns, columns); err != nil {
+		return fmt.Errorf("adding columns: %w", err)
+	}
+
+	return nil
+}
+
+func (tm *TableManager) checkColumns(structure map[string]utils.PgDataType, columns *utils.TargetColumns) ([]int, error) {
+	var missingColumns []int
+	for i, colName := range columns.Names {
+		colType, ok := structure[colName]
+		if !ok {
+			missingColumns = append(missingColumns, i)
+		}
+		if !utils.PgTypeCanContain(colType, columns.DataTypes[i]) {
+			return nil, fmt.Errorf("column type '%s' cannot store '%s'", colType, columns.DataTypes[i])
+		}
+	}
+	return missingColumns, nil
 }

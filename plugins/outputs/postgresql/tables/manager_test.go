@@ -35,7 +35,7 @@ func (m *mockDb) IsAlive() bool { return true }
 
 func TestNewManager(t *testing.T) {
 	db := &mockDb{}
-	res := NewManager(db, "schema", "table template").(*defTableManager)
+	res := NewManager(db, "schema", "table template").(*TableManager)
 	assert.Equal(t, "table template", res.tableTemplate)
 	assert.Equal(t, "schema", res.schema)
 	assert.Equal(t, db, res.db)
@@ -77,7 +77,7 @@ func TestExists(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.desc, func(t *testing.T) {
-			manager := &defTableManager{
+			manager := &TableManager{
 				Tables: tc.cache,
 				db:     tc.db,
 			}
@@ -126,7 +126,7 @@ func TestCreateTable(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.desc, func(t *testing.T) {
-			manager := &defTableManager{
+			manager := &TableManager{
 				Tables:        map[string]bool{},
 				db:            tc.db,
 				tableTemplate: tc.template,

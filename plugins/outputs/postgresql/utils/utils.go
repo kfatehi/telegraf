@@ -3,13 +3,14 @@ package utils
 import (
 	"encoding/json"
 	"fmt"
-	"hash/maphash"
+	"hash/fnv"
 	"log"
 	"strings"
 	"time"
 
-	"github.com/influxdata/telegraf"
 	"github.com/jackc/pgx/v4"
+
+	"github.com/influxdata/telegraf"
 )
 
 const (
@@ -139,12 +140,12 @@ func GenerateInsert(fullSanitizedTableName string, columns []string) string {
 }
 
 func GetTagID(metric telegraf.Metric) int64 {
-	var hash maphash.Hash
+	hash := fnv.New64a()
 	for _, tag := range metric.TagList() {
-		_, _ = hash.WriteString(tag.Key)
-		_ = hash.WriteByte(0)
-		_, _ = hash.WriteString(tag.Value)
-		_ = hash.WriteByte(0)
+		_, _ = hash.Write([]byte(tag.Key))
+		_, _ = hash.Write([]byte{0})
+		_, _ = hash.Write([]byte(tag.Value))
+		_, _ = hash.Write([]byte{0})
 	}
 	// Convert to int64 as postgres does not support uint64
 	return int64(hash.Sum64())
