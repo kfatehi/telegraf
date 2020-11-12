@@ -17,21 +17,18 @@ const (
 )
 
 // GroupMetricsByMeasurement groups the list of metrics by the measurement name.
-// But the values are the index of the measure from the input list of measures.
-// [m, m, m2, m2, m] => {m:[0,1,4], m2:[2,3]}
-func GroupMetricsByMeasurement(m []telegraf.Metric) map[string][]int {
-	toReturn := make(map[string][]int)
-	for i, metric := range m {
-		var metricLocations []int
+func GroupMetricsByMeasurement(m []telegraf.Metric) map[string][]telegraf.Metric {
+	groups := make(map[string][]telegraf.Metric)
+	for _, metric := range m {
+		var group []telegraf.Metric
 		var ok bool
 		name := metric.Name()
-		if metricLocations, ok = toReturn[name]; !ok {
-			metricLocations = []int{}
-			toReturn[name] = metricLocations
+		if group, ok = groups[name]; !ok {
+			group = []telegraf.Metric{}
 		}
-		toReturn[name] = append(metricLocations, i)
+		groups[name] = append(group, metric)
 	}
-	return toReturn
+	return groups
 }
 
 // BuildJsonb returns a byte array of the json representation

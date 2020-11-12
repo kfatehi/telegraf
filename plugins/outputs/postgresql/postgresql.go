@@ -3,6 +3,7 @@ package postgresql
 import (
 	"context"
 	"log"
+	"time"
 
 	"github.com/jackc/pgx/v4"
 	"github.com/jackc/pgx/v4/pgxpool"
@@ -31,6 +32,8 @@ type Postgresql struct {
 	tables          tables.Manager
 	tagTables       tables.Manager
 
+	writeChan chan []telegraf.Metric
+
 	rows    transformer
 	columns columns.Mapper
 }
@@ -52,7 +55,7 @@ func newPostgresql() *Postgresql {
 
 // Connect establishes a connection to the target database and prepares the cache
 func (p *Postgresql) Connect() error {
-	poolConfig, err := pgxpool.ParseConfig(p.Connection)
+	poolConfig, err := pgxpool.ParseConfig("pool_max_conns=1 " + p.Connection)
 	if err != nil {
 		return err
 	}
@@ -73,6 +76,15 @@ func (p *Postgresql) Connect() error {
 
 	p.rows = newRowTransformer(p.TagsAsForeignkeys, p.TagsAsJsonb, p.FieldsAsJsonb)
 	p.columns = columns.NewMapper(p.TagsAsForeignkeys, p.TagsAsJsonb, p.FieldsAsJsonb)
+
+	maxConns := int(p.db.Stat().MaxConns())
+	if maxConns > 1 {
+		p.writeChan = make(chan []telegraf.Metric, maxConns)
+		for i := 0; i < maxConns; i++ {
+			go p.writeWorker(p.dbContext)
+		}
+	}
+
 	return nil
 }
 
@@ -157,8 +169,17 @@ func (p *Postgresql) Description() string  { return "Send metrics to PostgreSQL"
 
 func (p *Postgresql) Write(metrics []telegraf.Metric) error {
 	metricsByMeasurement := utils.GroupMetricsByMeasurement(metrics)
-	for measureName, indices := range metricsByMeasurement {
-		err := p.writeMetricsFromMeasure(p.dbContext, measureName, indices, metrics)
+
+	if p.db.Stat().MaxConns() > 1 {
+		return p.writeConcurrent(metricsByMeasurement)
+	} else {
+		return p.writeSequential(metricsByMeasurement)
+	}
+}
+
+func (p *Postgresql) writeSequential(metricsByMeasurement map[string][]telegraf.Metric) error {
+	for _, metrics := range metricsByMeasurement {
+		err := p.writeMetricsFromMeasure(p.dbContext, metrics)
 		if err != nil {
 			log.Printf("copy error: %v", err)
 			return err
@@ -167,12 +188,61 @@ func (p *Postgresql) Write(metrics []telegraf.Metric) error {
 	return nil
 }
 
-// Writes only the metrics from a specified measure. 'metricIndices' is an array
-// of the metrics that belong to the selected 'measureName' for faster lookup.
-// If schema updates are enabled the target db tables are updated to be able
-// to hold the new values.
-func (p *Postgresql) writeMetricsFromMeasure(ctx context.Context, measureName string, metricIndices []int, metrics []telegraf.Metric) error {
-	targetColumns, targetTagColumns := p.columns.Target(metricIndices, metrics)
+func (p *Postgresql) writeConcurrent(metricsByMeasurement map[string][]telegraf.Metric) error {
+	for _, metrics := range metricsByMeasurement {
+		select {
+		case p.writeChan <- metrics:
+		case <-p.dbContext.Done():
+			return nil
+		}
+	}
+	return nil
+}
+
+var backoffInit = time.Millisecond * 250
+var backoffMax = time.Second * 15
+
+func (p *Postgresql) writeWorker(ctx context.Context) {
+	for {
+		select {
+		case metrics := <-p.writeChan:
+			backoff := time.Duration(0)
+			for {
+				err := p.writeMetricsFromMeasure(ctx, metrics)
+				if err == nil {
+					break
+				}
+
+				if !isTempError(err) {
+					log.Printf("write error (permanent): %v", err)
+					break
+				}
+				log.Printf("write error (retry in %s): %v", backoff, err)
+				time.Sleep(backoff)
+
+				if backoff == 0 {
+					backoff = backoffInit
+				} else {
+					backoff *= 2
+					if backoff > backoffMax {
+						backoff = backoffMax
+					}
+				}
+			}
+		case <-p.dbContext.Done():
+			return
+		}
+	}
+}
+
+func isTempError(err error) bool {
+	return false
+}
+
+// Writes the metrics from a specified measure. All the provided metrics must belong to the same measurement.
+func (p *Postgresql) writeMetricsFromMeasure(ctx context.Context, metrics []telegraf.Metric) error {
+	targetColumns, targetTagColumns := p.columns.Target(metrics)
+	measureName := metrics[0].Name()
 
 	if p.DoSchemaUpdates {
 		if err := p.prepareTable(ctx, p.tables, measureName, targetColumns); err != nil {
@@ -186,10 +256,10 @@ func (p *Postgresql) writeMetricsFromMeasure(ctx context.Context, measureName st
 		}
 	}
 	numColumns := len(targetColumns.Names)
-	values := make([][]interface{}, len(metricIndices))
+	values := make([][]interface{}, len(metrics))
 	var rowTransformErr error
-	for rowNum, metricIndex := range metricIndices {
-		values[rowNum], rowTransformErr = p.rows.createRowFromMetric(numColumns, metrics[metricIndex], targetColumns, targetTagColumns)
+	for rowNum, metric := range metrics {
+		values[rowNum], rowTransformErr = p.rows.createRowFromMetric(numColumns, metric, targetColumns, targetTagColumns)
 		if rowTransformErr != nil {
 			log.Printf("E! Could not transform metric to proper row\n%v", rowTransformErr)
 			return rowTransformErr
