@@ -129,14 +129,14 @@ func (tm *TableManager) refreshTableStructure(ctx context.Context, tableName str
 	return nil
 }
 
-func (tm *TableManager) EnsureStructure(ctx context.Context, tableName string, columns []utils.Column, doSchemaUpdate bool) error {
+func (tm *TableManager) EnsureStructure(ctx context.Context, tableName string, columns []utils.Column, doSchemaUpdate bool) ([]utils.Column, error) {
 	tm.tablesMutex.RLock()
 	structure, ok := tm.Tables[tableName]
 	tm.tablesMutex.RUnlock()
 	if !ok {
 		// We don't know about the table. First try to query it.
 		if err := tm.refreshTableStructure(ctx, tableName); err != nil {
-			return fmt.Errorf("querying table structure: %w", err)
+			return nil, fmt.Errorf("querying table structure: %w", err)
 		}
 		tm.tablesMutex.RLock()
 		structure, ok = tm.Tables[tableName]
@@ -144,7 +144,7 @@ func (tm *TableManager) EnsureStructure(ctx context.Context, tableName string, c
 		if !ok {
 			// Ok, table doesn't exist, now we can create it.
 			if err := tm.createTable(ctx, tableName, columns); err != nil {
-				return fmt.Errorf("creating table: %w", err)
+				return nil, fmt.Errorf("creating table: %w", err)
 			}
 			tm.tablesMutex.RLock()
 			structure = tm.Tables[tableName]
@@ -154,25 +154,20 @@ func (tm *TableManager) EnsureStructure(ctx context.Context, tableName string, c
 
 	missingColumns, err := tm.checkColumns(structure, columns)
 	if err != nil {
-		return fmt.Errorf("column validation: %w", err)
+		return nil, fmt.Errorf("column validation: %w", err)
 	}
 	if len(missingColumns) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	if doSchemaUpdate {
 		if err := tm.addColumnsToTable(ctx, tableName, missingColumns); err != nil {
-			return fmt.Errorf("adding columns: %w", err)
+			return nil, fmt.Errorf("adding columns: %w", err)
 		}
-	} else {
-		colSpecs := make([]string, len(missingColumns))
-		for i, col := range missingColumns {
-			colSpecs[i] = col.Name + " " + string(col.Type)
-		}
-		return fmt.Errorf("missing columns: %s", strings.Join(colSpecs, ", "))
+		return nil, nil
 	}
 
-	return nil
+	return missingColumns, nil
 }
 
 func (tm *TableManager) checkColumns(structure map[string]utils.PgDataType, columns []utils.Column) ([]utils.Column, error) {

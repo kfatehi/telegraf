@@ -134,7 +134,17 @@ func (rs *RowSource) DropFieldColumn(col utils.Column) {
 		panic(fmt.Sprintf("Tried to perform an invalid field drop. This should not have happened. measurement=%s field=%s", rs.Name(), col.Name))
 	}
 
+	pos, ok := rs.fieldPositions[col.Name]
+	if !ok {
+		return
+	}
 	delete(rs.fieldPositions, col.Name)
+	for n, p := range rs.fieldPositions {
+		if p > pos {
+			rs.fieldPositions[n] -= 1
+		}
+	}
+
 	for i, fc := range rs.fieldColumns {
 		if fc.Name != col.Name {
 			continue

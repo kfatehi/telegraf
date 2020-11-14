@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v4"
@@ -248,14 +249,31 @@ func (p *Postgresql) writeMetricsFromMeasure(ctx context.Context, rowSource *Row
 	targetTagColumns := rowSource.TagColumns()
 	measureName := rowSource.Name()
 
-	if err := p.tables.EnsureStructure(ctx, measureName, targetColumns, p.DoSchemaUpdates); err != nil {
+	missingColumns, err := p.tables.EnsureStructure(ctx, measureName, targetColumns, p.DoSchemaUpdates)
+	if err != nil {
 		return fmt.Errorf("validating table '%s': %w", measureName, err)
 	}
 	if p.TagsAsForeignkeys {
 		tagTableName := measureName + p.TagTableSuffix
-		if err := p.tagTables.EnsureStructure(ctx, tagTableName, targetTagColumns, p.DoSchemaUpdates); err != nil {
+		if _, err := p.tagTables.EnsureStructure(ctx, tagTableName, targetTagColumns, true); err != nil {
 			return fmt.Errorf("validating table '%s': %w", tagTableName, err)
 		}
+	}
+
+	if missingColumns != nil {
+		for _, col := range missingColumns {
+			if col.Role != utils.FieldColType {
+				return fmt.Errorf("table '%s' missing critical column: %s %s", measureName, col.Name, col.Type)
+			}
+			rowSource.DropFieldColumn(col)
+			targetColumns = rowSource.Columns()
+		}
+
+		colSpecs := make([]string, len(missingColumns))
+		for i, col := range missingColumns {
+			colSpecs[i] = col.Name + " " + string(col.Type)
+		}
+		log.Printf("[outputs.postgresql] Error: Table '%s' missing columns (fields dropped): %s", measureName, strings.Join(colSpecs, ", "))
 	}
 
 	columnPositions := make(map[string]int, len(targetColumns))
@@ -266,6 +284,6 @@ func (p *Postgresql) writeMetricsFromMeasure(ctx context.Context, rowSource *Row
 	}
 
 	fullTableName := utils.FullTableName(p.Schema, measureName)
-	_, err := p.db.CopyFrom(ctx, fullTableName, columnNames, rowSource)
+	_, err = p.db.CopyFrom(ctx, fullTableName, columnNames, rowSource)
 	return err
 }
