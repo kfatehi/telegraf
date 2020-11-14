@@ -3,10 +3,10 @@ package tables
 import (
 	"context"
 	"fmt"
-	"github.com/jackc/pgx/v4/pgxpool"
-	"github.com/pkg/errors"
-	"log"
 	"strings"
+	"sync"
+
+	"github.com/jackc/pgx/v4/pgxpool"
 
 	"github.com/influxdata/telegraf/plugins/outputs/postgresql/utils"
 )
@@ -16,13 +16,9 @@ const (
 	findExistingColumnsTemplate = "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = $1 and table_name = $2"
 )
 
-type columnInDbDef struct {
-	dataType utils.PgDataType
-	exists   bool
-}
-
 type TableManager struct {
 	Tables        map[string]map[string]utils.PgDataType
+	tablesMutex   sync.RWMutex
 	db            *pgxpool.Pool
 	schema        string
 	tableTemplate string
@@ -41,42 +37,47 @@ func NewManager(db *pgxpool.Pool, schema, tableTemplate string) *TableManager {
 
 // ClearTableCache clear the table structure cache.
 func (tm *TableManager) ClearTableCache() {
+	tm.tablesMutex.Lock()
 	tm.Tables = make(map[string]map[string]utils.PgDataType)
+	tm.tablesMutex.Unlock()
 }
 
 // Creates a table in the database with the column names and types specified in 'colDetails'
-func (tm *TableManager) createTable(ctx context.Context, tableName string, colDetails *utils.TargetColumns) error {
-	colDetails.Sort()
+func (tm *TableManager) createTable(ctx context.Context, tableName string, colDetails []utils.Column) error {
+	utils.ColumnList(colDetails).Sort()
 	sql := tm.generateCreateTableSQL(tableName, colDetails)
 	if _, err := tm.db.Exec(ctx, sql); err != nil {
 		return err
 	}
 
-	columns := make(map[string]utils.PgDataType, len(colDetails.Names))
-	for i, colName := range colDetails.Names {
-		columns[colName] = colDetails.DataTypes[i]
+	structure := map[string]utils.PgDataType{}
+	for _, col := range colDetails {
+		structure[col.Name] = col.Type
 	}
 
-	tm.Tables[tableName] = columns
+	tm.tablesMutex.Lock()
+	tm.Tables[tableName] = structure
+	tm.tablesMutex.Unlock()
 	return nil
 }
 
 // addColumnsToTable adds the indicated columns to the table in the database.
 // This is an idempotent operation, so attempting to add a column which already exists is a silent no-op.
-func (tm *TableManager) addColumnsToTable(ctx context.Context, tableName string, columnIndices []int, colDetails *utils.TargetColumns) error {
+func (tm *TableManager) addColumnsToTable(ctx context.Context, tableName string, colDetails []utils.Column) error {
+	utils.ColumnList(colDetails).Sort()
 	fullTableName := utils.FullTableName(tm.schema, tableName).Sanitize()
-	for _, colIndex := range columnIndices {
-		name := colDetails.Names[colIndex]
-		dataType := colDetails.DataTypes[colIndex]
-		addColumnQuery := fmt.Sprintf(addColumnTemplate, fullTableName, utils.QuoteIdent(name), dataType)
+	for _, col := range colDetails {
+		addColumnQuery := fmt.Sprintf(addColumnTemplate, fullTableName, utils.QuoteIdent(col.Name), col.Type)
 		_, err := tm.db.Exec(ctx, addColumnQuery)
 		if err != nil {
-			return fmt.Errorf("adding '%s': %w", name, err)
+			return fmt.Errorf("adding '%s': %w", col.Name, err)
 		}
 
 		//FIXME if the column exists, but is a different type, we won't get an error, but we need to ensure the type is one
 		// we can use, and not just assume it's correct.
-		tm.Tables[tableName][name] = dataType
+		tm.tablesMutex.Lock()
+		tm.Tables[tableName][col.Name] = col.Type
+		tm.tablesMutex.Unlock()
 	}
 
 	return nil
@@ -85,13 +86,13 @@ func (tm *TableManager) addColumnsToTable(ctx context.Context, tableName string,
 // Populate the 'tableTemplate' (supplied as config option to the plugin) with the details of
 // the required columns for the measurement to create a 'CREATE TABLE' SQL statement.
 // The order, column names and data types are given in 'colDetails'.
-func (tm *TableManager) generateCreateTableSQL(tableName string, colDetails *utils.TargetColumns) string {
-	colDefs := make([]string, len(colDetails.Names))
+func (tm *TableManager) generateCreateTableSQL(tableName string, colDetails []utils.Column) string {
+	colDefs := make([]string, len(colDetails))
 	var pk []string
-	for colIndex, colName := range colDetails.Names {
-		colDefs[colIndex] = utils.QuoteIdent(colName) + " " + string(colDetails.DataTypes[colIndex])
-		if colDetails.Roles[colIndex] != utils.FieldColType {
-			pk = append(pk, colName)
+	for i, col := range colDetails {
+		colDefs[i] = utils.QuoteIdent(col.Name) + " " + string(col.Type)
+		if col.Role != utils.FieldColType {
+			pk = append(pk, col.Name)
 		}
 	}
 
@@ -107,8 +108,7 @@ func (tm *TableManager) generateCreateTableSQL(tableName string, colDetails *uti
 func (tm *TableManager) refreshTableStructure(ctx context.Context, tableName string) error {
 	rows, err := tm.db.Query(ctx, findExistingColumnsTemplate, tm.schema, tableName)
 	if err != nil {
-		log.Printf("E! Couldn't discover existing columns of table: %s\n%v", tableName, err)
-		return errors.Wrap(err, "could not discover existing columns")
+		return err
 	}
 	defer rows.Close()
 	cols := make(map[string]utils.PgDataType)
@@ -116,30 +116,39 @@ func (tm *TableManager) refreshTableStructure(ctx context.Context, tableName str
 		var colName, colTypeStr string
 		err := rows.Scan(&colName, &colTypeStr)
 		if err != nil {
-			log.Printf("E! Couldn't discover columns of table: %s\n%v", tableName, err)
 			return err
 		}
 		cols[colName] = utils.PgDataType(colTypeStr)
 	}
 
-	tm.Tables[tableName] = cols
+	if len(cols) > 0 {
+		tm.tablesMutex.Lock()
+		tm.Tables[tableName] = cols
+		tm.tablesMutex.Unlock()
+	}
 	return nil
 }
 
-func (tm *TableManager) EnsureStructure(ctx context.Context, tableName string, columns *utils.TargetColumns) error {
+func (tm *TableManager) EnsureStructure(ctx context.Context, tableName string, columns []utils.Column, doSchemaUpdate bool) error {
+	tm.tablesMutex.RLock()
 	structure, ok := tm.Tables[tableName]
+	tm.tablesMutex.RUnlock()
 	if !ok {
 		// We don't know about the table. First try to query it.
 		if err := tm.refreshTableStructure(ctx, tableName); err != nil {
 			return fmt.Errorf("querying table structure: %w", err)
 		}
+		tm.tablesMutex.RLock()
 		structure, ok = tm.Tables[tableName]
+		tm.tablesMutex.RUnlock()
 		if !ok {
 			// Ok, table doesn't exist, now we can create it.
 			if err := tm.createTable(ctx, tableName, columns); err != nil {
 				return fmt.Errorf("creating table: %w", err)
 			}
+			tm.tablesMutex.RLock()
 			structure = tm.Tables[tableName]
+			tm.tablesMutex.RUnlock()
 		}
 	}
 
@@ -151,22 +160,31 @@ func (tm *TableManager) EnsureStructure(ctx context.Context, tableName string, c
 		return nil
 	}
 
-	if err := tm.addColumnsToTable(ctx, tableName, missingColumns, columns); err != nil {
-		return fmt.Errorf("adding columns: %w", err)
+	if doSchemaUpdate {
+		if err := tm.addColumnsToTable(ctx, tableName, missingColumns); err != nil {
+			return fmt.Errorf("adding columns: %w", err)
+		}
+	} else {
+		colSpecs := make([]string, len(missingColumns))
+		for i, col := range missingColumns {
+			colSpecs[i] = col.Name + " " + string(col.Type)
+		}
+		return fmt.Errorf("missing columns: %s", strings.Join(colSpecs, ", "))
 	}
 
 	return nil
 }
 
-func (tm *TableManager) checkColumns(structure map[string]utils.PgDataType, columns *utils.TargetColumns) ([]int, error) {
-	var missingColumns []int
-	for i, colName := range columns.Names {
-		colType, ok := structure[colName]
+func (tm *TableManager) checkColumns(structure map[string]utils.PgDataType, columns []utils.Column) ([]utils.Column, error) {
+	var missingColumns []utils.Column
+	for _, col := range columns {
+		dbColType, ok := structure[col.Name]
 		if !ok {
-			missingColumns = append(missingColumns, i)
+			missingColumns = append(missingColumns, col)
+			continue
 		}
-		if !utils.PgTypeCanContain(colType, columns.DataTypes[i]) {
-			return nil, fmt.Errorf("column type '%s' cannot store '%s'", colType, columns.DataTypes[i])
+		if !utils.PgTypeCanContain(dbColType, col.Type) {
+			return nil, fmt.Errorf("column type '%s' cannot store '%s'", dbColType, col.Type)
 		}
 	}
 	return missingColumns, nil

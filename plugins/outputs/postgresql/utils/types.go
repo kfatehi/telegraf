@@ -19,39 +19,48 @@ const (
 // PgDataType defines a string that represents a PostgreSQL data type.
 type PgDataType string
 
-// TargetColumns contains all the information needed to map a collection of
-// metrics who belong to the same Measurement.
-type TargetColumns struct {
-	// the names the columns will have in the database
-	Names []string
-	// column name -> order number. where to place each column in rows
-	// batched to the db
-	Target map[string]int
+type Column struct {
+	Name string
 	// the data type of each column should have in the db. used when checking
 	// if the schema matches or it needs updates
-	DataTypes []PgDataType
+	Type PgDataType
 	// the role each column has, helps properly map the metric to the db
-	Roles []ColumnRole
+	Role ColumnRole
 }
 
-func (tcs TargetColumns) Len() int {
-	return len(tcs.Names)
+//// TargetColumns contains all the information needed to map a collection of
+//// metrics who belong to the same Measurement.
+//type TargetColumns struct {
+//	// the names the columns will have in the database
+//	Names []string
+//	// column name -> order number. where to place each column in rows
+//	// batched to the db
+//	Target map[string]int
+//	// the data type of each column should have in the db. used when checking
+//	// if the schema matches or it needs updates
+//	DataTypes []PgDataType
+//	// the role each column has, helps properly map the metric to the db
+//	Roles []ColumnRole
+//}
+//
+
+type ColumnList []Column
+
+func (cl ColumnList) Len() int {
+	return len(cl)
 }
 
-func (tcs TargetColumns) Less(i, j int) bool {
-	if tcs.Roles[i] != tcs.Roles[j] {
-		return tcs.Roles[i] < tcs.Roles[j]
+func (cl ColumnList) Less(i, j int) bool {
+	if cl[i].Role != cl[j].Role {
+		return cl[i].Role < cl[j].Role
 	}
-	return strings.ToLower(tcs.Names[i]) < strings.ToLower(tcs.Names[j])
+	return strings.ToLower(cl[i].Name) < strings.ToLower(cl[j].Name)
 }
 
-func (tcs TargetColumns) Swap(i, j int) {
-	tcs.Names[i], tcs.Names[j] = tcs.Names[j], tcs.Names[i]
-	tcs.Target[tcs.Names[i]], tcs.Target[tcs.Names[j]] = tcs.Target[tcs.Names[j]], tcs.Target[tcs.Names[i]]
-	tcs.DataTypes[i], tcs.DataTypes[j] = tcs.DataTypes[j], tcs.DataTypes[i]
-	tcs.Roles[i], tcs.Roles[j] = tcs.Roles[j], tcs.Roles[i]
+func (cl ColumnList) Swap(i, j int) {
+	cl[i], cl[j] = cl[j], cl[i]
 }
 
-func (tcs TargetColumns) Sort() {
-	sort.Sort(tcs)
+func (cl ColumnList) Sort() {
+	sort.Sort(cl)
 }

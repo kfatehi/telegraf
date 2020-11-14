@@ -2,6 +2,7 @@ package postgresql
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"time"
 
@@ -10,7 +11,6 @@ import (
 
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/plugins/outputs"
-	"github.com/influxdata/telegraf/plugins/outputs/postgresql/columns"
 	"github.com/influxdata/telegraf/plugins/outputs/postgresql/tables"
 	"github.com/influxdata/telegraf/plugins/outputs/postgresql/utils"
 )
@@ -32,10 +32,7 @@ type Postgresql struct {
 	tables          *tables.TableManager
 	tagTables       *tables.TableManager
 
-	writeChan chan []telegraf.Metric
-
-	rows    transformer
-	columns columns.Mapper
+	writeChan chan *RowSource
 }
 
 func init() {
@@ -74,12 +71,9 @@ func (p *Postgresql) Connect() error {
 		p.tagTables = tables.NewManager(p.db, p.Schema, createTableTemplate)
 	}
 
-	p.rows = newRowTransformer(p.TagsAsForeignkeys, p.TagsAsJsonb, p.FieldsAsJsonb)
-	p.columns = columns.NewMapper(p.TagsAsForeignkeys, p.TagsAsJsonb, p.FieldsAsJsonb)
-
 	maxConns := int(p.db.Stat().MaxConns())
 	if maxConns > 1 {
-		p.writeChan = make(chan []telegraf.Metric, maxConns)
+		p.writeChan = make(chan *RowSource)
 		for i := 0; i < maxConns; i++ {
 			go p.writeWorker(p.dbContext)
 		}
@@ -168,18 +162,18 @@ func (p *Postgresql) SampleConfig() string { return sampleConfig }
 func (p *Postgresql) Description() string  { return "Send metrics to PostgreSQL" }
 
 func (p *Postgresql) Write(metrics []telegraf.Metric) error {
-	metricsByMeasurement := utils.GroupMetricsByMeasurement(metrics)
+	rowSources := p.splitRowSources(metrics)
 
 	if p.db.Stat().MaxConns() > 1 {
-		return p.writeConcurrent(metricsByMeasurement)
+		return p.writeConcurrent(rowSources)
 	} else {
-		return p.writeSequential(metricsByMeasurement)
+		return p.writeSequential(rowSources)
 	}
 }
 
-func (p *Postgresql) writeSequential(metricsByMeasurement map[string][]telegraf.Metric) error {
-	for _, metrics := range metricsByMeasurement {
-		err := p.writeMetricsFromMeasure(p.dbContext, metrics)
+func (p *Postgresql) writeSequential(rowSources map[string]*RowSource) error {
+	for _, rowSource := range rowSources {
+		err := p.writeMetricsFromMeasure(p.dbContext, rowSource)
 		if err != nil {
 			if !isTempError(err) {
 				log.Printf("write error (permanent): %v", err)
@@ -191,10 +185,10 @@ func (p *Postgresql) writeSequential(metricsByMeasurement map[string][]telegraf.
 	return nil
 }
 
-func (p *Postgresql) writeConcurrent(metricsByMeasurement map[string][]telegraf.Metric) error {
-	for _, metrics := range metricsByMeasurement {
+func (p *Postgresql) writeConcurrent(rowSources map[string]*RowSource) error {
+	for _, rowSource := range rowSources {
 		select {
-		case p.writeChan <- metrics:
+		case p.writeChan <- rowSource:
 		case <-p.dbContext.Done():
 			return nil
 		}
@@ -205,8 +199,8 @@ func (p *Postgresql) writeConcurrent(metricsByMeasurement map[string][]telegraf.
 func (p *Postgresql) writeWorker(ctx context.Context) {
 	for {
 		select {
-		case metrics := <-p.writeChan:
-			if err := p.writeRetry(ctx, metrics); err != nil {
+		case rowSource := <-p.writeChan:
+			if err := p.writeRetry(ctx, rowSource); err != nil {
 				log.Printf("write error (permanent): %v", err)
 			}
 		case <-p.dbContext.Done():
@@ -222,10 +216,10 @@ func isTempError(err error) bool {
 var backoffInit = time.Millisecond * 250
 var backoffMax = time.Second * 15
 
-func (p *Postgresql) writeRetry(ctx context.Context, metrics []telegraf.Metric) error {
+func (p *Postgresql) writeRetry(ctx context.Context, rowSource *RowSource) error {
 	backoff := time.Duration(0)
 	for {
-		err := p.writeMetricsFromMeasure(ctx, metrics)
+		err := p.writeMetricsFromMeasure(ctx, rowSource)
 		if err == nil {
 			return nil
 		}
@@ -234,6 +228,7 @@ func (p *Postgresql) writeRetry(ctx context.Context, metrics []telegraf.Metric) 
 			return err
 		}
 		log.Printf("write error (retry in %s): %v", backoff, err)
+		rowSource.Reset()
 		time.Sleep(backoff)
 
 		if backoff == 0 {
@@ -248,33 +243,29 @@ func (p *Postgresql) writeRetry(ctx context.Context, metrics []telegraf.Metric) 
 }
 
 // Writes the metrics from a specified measure. All the provided metrics must belong to the same measurement.
-func (p *Postgresql) writeMetricsFromMeasure(ctx context.Context, metrics []telegraf.Metric) error {
-	targetColumns, targetTagColumns := p.columns.Target(metrics)
-	measureName := metrics[0].Name()
+func (p *Postgresql) writeMetricsFromMeasure(ctx context.Context, rowSource *RowSource) error {
+	targetColumns := rowSource.Columns()
+	targetTagColumns := rowSource.TagColumns()
+	measureName := rowSource.Name()
 
-	if p.DoSchemaUpdates {
-		if err := p.tables.EnsureStructure(ctx, measureName, targetColumns); err != nil {
-			return err
-		}
-		if p.TagsAsForeignkeys {
-			tagTableName := measureName + p.TagTableSuffix
-			if err := p.tagTables.EnsureStructure(ctx, tagTableName, targetTagColumns); err != nil {
-				return err
-			}
+	if err := p.tables.EnsureStructure(ctx, measureName, targetColumns, p.DoSchemaUpdates); err != nil {
+		return fmt.Errorf("validating table '%s': %w", measureName, err)
+	}
+	if p.TagsAsForeignkeys {
+		tagTableName := measureName + p.TagTableSuffix
+		if err := p.tagTables.EnsureStructure(ctx, tagTableName, targetTagColumns, p.DoSchemaUpdates); err != nil {
+			return fmt.Errorf("validating table '%s': %w", tagTableName, err)
 		}
 	}
-	numColumns := len(targetColumns.Names)
-	values := make([][]interface{}, len(metrics))
-	var rowTransformErr error
-	for rowNum, metric := range metrics {
-		values[rowNum], rowTransformErr = p.rows.createRowFromMetric(numColumns, metric, targetColumns, targetTagColumns)
-		if rowTransformErr != nil {
-			log.Printf("E! Could not transform metric to proper row\n%v", rowTransformErr)
-			return rowTransformErr
-		}
+
+	columnPositions := make(map[string]int, len(targetColumns))
+	columnNames := make([]string, len(targetColumns))
+	for i, col := range targetColumns {
+		columnPositions[col.Name] = i
+		columnNames[i] = col.Name
 	}
 
 	fullTableName := utils.FullTableName(p.Schema, measureName)
-	_, err := p.db.CopyFrom(ctx, fullTableName, targetColumns.Names, pgx.CopyFromRows(values))
+	_, err := p.db.CopyFrom(ctx, fullTableName, columnNames, rowSource)
 	return err
 }

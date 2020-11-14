@@ -17,21 +17,6 @@ const (
 	insertIntoSQLTemplate = "INSERT INTO %s(%s) VALUES(%s)"
 )
 
-// GroupMetricsByMeasurement groups the list of metrics by the measurement name.
-func GroupMetricsByMeasurement(m []telegraf.Metric) map[string][]telegraf.Metric {
-	groups := make(map[string][]telegraf.Metric)
-	for _, metric := range m {
-		var group []telegraf.Metric
-		var ok bool
-		name := metric.Name()
-		if group, ok = groups[name]; !ok {
-			group = []telegraf.Metric{}
-		}
-		groups[name] = append(group, metric)
-	}
-	return groups
-}
-
 // BuildJsonb returns a byte array of the json representation
 // of the passed object.
 func BuildJsonb(data interface{}) ([]byte, error) {
@@ -70,6 +55,7 @@ const (
 	PgBigInt                   = "bigint"
 	PgReal                     = "real"
 	PgDoublePrecision          = "double precision"
+	PgNumeric                  = "numeric"
 	PgText                     = "text"
 	PgTimestampWithTimeZone    = "timestamp with time zone"
 	PgTimestampWithoutTimeZone = "timestamp without time zone"
@@ -83,9 +69,11 @@ func DerivePgDatatype(value interface{}) PgDataType {
 	switch value.(type) {
 	case bool:
 		return PgBool
-	case uint64, int64, int, uint:
+	case uint64:
+		return PgNumeric
+	case int64, int, uint, uint32:
 		return PgBigInt
-	case uint32, int32:
+	case int32:
 		return PgInteger
 	case int16, int8:
 		return PgSmallInt
@@ -113,10 +101,10 @@ func PgTypeCanContain(canThis PgDataType, containThis PgDataType) bool {
 		return containThis == PgInteger || containThis == PgSmallInt
 	case PgInteger:
 		return containThis == PgSmallInt
-	case PgDoublePrecision:
+	case PgDoublePrecision, PgReal: // You can store a real in a double, you just lose precision
 		return containThis == PgReal || containThis == PgBigInt || containThis == PgInteger || containThis == PgSmallInt
-	case PgReal:
-		return containThis == PgBigInt || containThis == PgInteger || containThis == PgSmallInt
+	case PgNumeric:
+		return containThis == PgBigInt || containThis == PgSmallInt || containThis == PgInteger || containThis == PgReal || containThis == PgDoublePrecision
 	case PgTimestampWithTimeZone:
 		return containThis == PgTimestampWithoutTimeZone
 	default:
