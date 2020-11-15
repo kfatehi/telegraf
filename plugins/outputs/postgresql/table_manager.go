@@ -235,10 +235,10 @@ func (tm *TableManager) MatchSource(ctx context.Context, rowSource *RowSource) e
 		if len(missingCols) > 0 {
 			colDefs := make([]string, len(missingCols))
 			for i, col := range missingCols {
+				rowSource.DropColumn(col)
 				colDefs[i] = col.Name + " " + string(col.Type)
 			}
-			//TODO just drop the individual rows instead. See RowSource.Next()
-			return fmt.Errorf("missing tag columns: %s", strings.Join(colDefs, ", "))
+			log.Printf("[outputs.postgresql] Error: table '%s' is missing tag columns (dropping metrics): %s", tagsTableName, strings.Join(colDefs, ", "))
 		}
 	}
 
@@ -257,13 +257,10 @@ func (tm *TableManager) MatchSource(ctx context.Context, rowSource *RowSource) e
 	if len(missingCols) > 0 {
 		colDefs := make([]string, len(missingCols))
 		for i, col := range missingCols {
+			rowSource.DropColumn(col)
 			colDefs[i] = col.Name + " " + string(col.Type)
 		}
 		log.Printf("[outputs.postgresql] Error: table '%s' is missing columns (dropping fields): %s", metricsTableName, strings.Join(colDefs, ", "))
-
-		for _, col := range missingCols {
-			rowSource.DropFieldColumn(col)
-		}
 	}
 
 	return nil

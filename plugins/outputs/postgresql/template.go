@@ -83,6 +83,12 @@ func (tc TemplateColumn) Definition() string {
 func (tc TemplateColumn) Identifier() string {
 	return QuoteIdentifier(tc.Name)
 }
+func (tc TemplateColumn) IsTag() bool {
+	return tc.Role == utils.TagColType
+}
+func (tc TemplateColumn) IsField() bool {
+	return tc.Role == utils.FieldColType
+}
 
 //func (tc TemplateColumn) Literal() string {
 //	return QuoteLiteral(tc.Name)

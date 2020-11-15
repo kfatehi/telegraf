@@ -23,19 +23,29 @@ func (p *Postgresql) splitRowSources(metrics []telegraf.Metric) map[string]*RowS
 }
 
 type RowSource struct {
-	postgresql *Postgresql
-	metrics    []telegraf.Metric
-	cursor     int
+	postgresql   *Postgresql
+	metrics      []telegraf.Metric
+	cursor       int
+	cursorValues []interface{}
+	cursorError  error
 
+	// tagPositions is the position of each tag within the tag set. Regardless of whether tags are foreign keys or not
 	tagPositions map[string]int
-	tagColumns   []utils.Column
-
-	fieldPositions map[string]int
-	fieldColumns   []utils.Column
-
-	// Technically this will only contain strings, since all tag values are strings. But this is a restriction of telegraf
+	// tagColumns is the list of tags to emit. List is in order.
+	tagColumns []utils.Column
+	// tagSets is the list of tag IDs to tag values in use within the RowSource. The position of each value in the list
+	// corresponds to the key name in the tagColumns list.
+	// This data is used to build out the foreign tag table when enabled.
+	// Technically the tag values will only contain strings, since all tag values are strings. But this is a restriction of telegraf
 	// metrics, and not postgres. It might be nice to support somehow converting tag values into native times.
 	tagSets map[int64][]interface{}
+
+	// fieldPositions is the position of each field within the tag set.
+	fieldPositions map[string]int
+	// fieldColumns is the list of fields to emit. List is in order.
+	fieldColumns []utils.Column
+
+	droppedTagColumns []string
 }
 
 func NewRowSource(postgresql *Postgresql) *RowSource {
@@ -92,6 +102,7 @@ func (rs *RowSource) Name() string {
 	return rs.metrics[0].Name()
 }
 
+// Returns the superset of all tags of all metrics.
 func (rs *RowSource) TagColumns() []utils.Column {
 	var cols []utils.Column
 
@@ -108,6 +119,7 @@ func (rs *RowSource) TagColumns() []utils.Column {
 	return cols
 }
 
+// Returns the superset of the union of all tags+fields of all metrics.
 func (rs *RowSource) Columns() []utils.Column {
 	cols := []utils.Column{
 		TimeColumn,
@@ -128,7 +140,51 @@ func (rs *RowSource) Columns() []utils.Column {
 	return cols
 }
 
-func (rs *RowSource) DropFieldColumn(col utils.Column) {
+func (rs *RowSource) DropColumn(col utils.Column) {
+	switch col.Role {
+	case utils.TagColType:
+		rs.dropTagColumn(col)
+	case utils.FieldColType:
+		rs.dropFieldColumn(col)
+	default:
+		panic(fmt.Sprintf("Tried to perform an invalid column drop. This should not have happened. measurement=%s name=%s role=%v", rs.Name(), col.Name, col.Role))
+	}
+}
+
+// Drops the tag column from conversion. Any metrics containing this tag will be skipped.
+func (rs *RowSource) dropTagColumn(col utils.Column) {
+	if col.Role != utils.TagColType || rs.postgresql.TagsAsJsonb {
+		panic(fmt.Sprintf("Tried to perform an invalid tag drop. This should not have happened. measurement=%s tag=%s", rs.Name(), col.Name))
+	}
+	rs.droppedTagColumns = append(rs.droppedTagColumns, col.Name)
+
+	pos, ok := rs.tagPositions[col.Name]
+	if !ok {
+		return
+	}
+
+	delete(rs.tagPositions, col.Name)
+	for n, p := range rs.tagPositions {
+		if p > pos {
+			rs.tagPositions[n] -= 1
+		}
+	}
+
+	rs.tagColumns = append(rs.tagColumns[:pos], rs.tagColumns[pos+1:]...)
+
+	for setID, set := range rs.tagSets {
+		if set[pos] != nil {
+			// The tag is defined, so drop the whole set
+			delete(rs.tagSets, setID)
+		} else {
+			// The tag is null, so keep the set, and just drop the column so we don't try to use it.
+			rs.tagSets[setID] = append(set, set[:pos], set[pos+1:])
+		}
+	}
+}
+
+// Drops the field column from conversion. Any metrics containing this field will have the field omitted.
+func (rs *RowSource) dropFieldColumn(col utils.Column) {
 	if col.Role != utils.FieldColType || rs.postgresql.FieldsAsJsonb {
 		panic(fmt.Sprintf("Tried to perform an invalid field drop. This should not have happened. measurement=%s field=%s", rs.Name(), col.Name))
 	}
@@ -137,6 +193,7 @@ func (rs *RowSource) DropFieldColumn(col utils.Column) {
 	if !ok {
 		return
 	}
+
 	delete(rs.fieldPositions, col.Name)
 	for n, p := range rs.fieldPositions {
 		if p > pos {
@@ -144,31 +201,32 @@ func (rs *RowSource) DropFieldColumn(col utils.Column) {
 		}
 	}
 
-	for i, fc := range rs.fieldColumns {
-		if fc.Name != col.Name {
-			continue
-		}
-		rs.fieldColumns = append(rs.fieldColumns[:i], rs.fieldColumns[i+1:]...)
-		break
-	}
+	rs.fieldColumns = append(rs.fieldColumns[:pos], rs.fieldColumns[pos+1:]...)
 }
 
 func (rs *RowSource) Next() bool {
-	if rs.cursor+1 >= len(rs.metrics) {
-		return false
+	for {
+		if rs.cursor+1 >= len(rs.metrics) {
+			rs.cursorValues = nil
+			rs.cursorError = nil
+			return false
+		}
+		rs.cursor += 1
+
+		rs.cursorValues, rs.cursorError = rs.values()
+		if rs.cursorValues != nil || rs.cursorError != nil {
+			return true
+		}
 	}
-	//TODO check if all fields were dropped and if so, skip to next.
-	// This can happen if schema updates are disabled and the table is missing all the requisite columns.
-	// We could also use this to skip when any of the tag columns are missing. Currently this is detected in MatchSource and we throw an error.
-	rs.cursor += 1
-	return true
 }
 
 func (rs *RowSource) Reset() {
 	rs.cursor = -1
 }
 
-func (rs *RowSource) Values() ([]interface{}, error) {
+// values calculates the values for the metric at the cursor position.
+// If the metric cannot be emitted, such as due to dropped tags, or all fields dropped, the return value is nil.
+func (rs *RowSource) values() ([]interface{}, error) {
 	metric := rs.metrics[rs.cursor]
 	tags := metric.TagList()
 	fields := metric.FieldList()
@@ -182,7 +240,12 @@ func (rs *RowSource) Values() ([]interface{}, error) {
 			// tags_as_foreignkey=false, tags_as_json=false
 			tagValues := make([]interface{}, len(rs.tagPositions))
 			for _, tag := range tags {
-				tagValues[rs.tagPositions[tag.Key]] = tag.Value
+				tagPos, ok := rs.tagPositions[tag.Key]
+				if !ok {
+					// tag has been dropped, we can't emit or we risk collision with another metric
+					return nil, nil
+				}
+				tagValues[tagPos] = tag.Value
 			}
 			values = append(values, tagValues...)
 		} else {
@@ -195,17 +258,28 @@ func (rs *RowSource) Values() ([]interface{}, error) {
 		}
 	} else {
 		// tags_as_foreignkey=true
-		values = append(values, utils.GetTagID(metric))
+		tagID := utils.GetTagID(metric)
+		if _, ok := rs.tagSets[tagID]; !ok {
+			// tag has been dropped, we can't emit or we risk collision with another metric
+			return nil, nil
+		}
+		values = append(values, tagID)
 	}
 
 	if !rs.postgresql.FieldsAsJsonb {
 		// fields_as_json=false
 		fieldValues := make([]interface{}, len(rs.fieldPositions))
+		fieldsEmpty := true
 		for _, field := range fields {
 			// we might have dropped the field due to the table missing the column & schema updates being turned off
 			if fPos, ok := rs.fieldPositions[field.Key]; ok {
 				fieldValues[fPos] = field.Value
+				fieldsEmpty = false
 			}
+		}
+		if fieldsEmpty {
+			// all fields have been dropped. Don't emit a metric with just tags and no fields.
+			return nil, nil
 		}
 		values = append(values, fieldValues...)
 	} else {
@@ -218,6 +292,10 @@ func (rs *RowSource) Values() ([]interface{}, error) {
 	}
 
 	return values, nil
+}
+
+func (rs *RowSource) Values() ([]interface{}, error) {
+	return rs.cursorValues, rs.cursorError
 }
 
 func (rs *RowSource) Err() error {
