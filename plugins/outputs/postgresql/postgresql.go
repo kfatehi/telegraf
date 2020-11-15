@@ -2,9 +2,7 @@ package postgresql
 
 import (
 	"context"
-	"fmt"
 	"log"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v4"
@@ -12,26 +10,26 @@ import (
 
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/plugins/outputs"
-	"github.com/influxdata/telegraf/plugins/outputs/postgresql/tables"
 	"github.com/influxdata/telegraf/plugins/outputs/postgresql/utils"
 )
 
 type Postgresql struct {
-	Connection        string
-	Schema            string
-	DoSchemaUpdates   bool
-	TagsAsForeignkeys bool
-	TagsAsJsonb       bool
-	FieldsAsJsonb     bool
-	TableTemplate     string
-	TagTableSuffix    string
-	PoolSize          int
+	Connection                 string
+	Schema                     string
+	TagsAsForeignkeys          bool
+	TagsAsJsonb                bool
+	FieldsAsJsonb              bool
+	CreateTemplates            []*Template
+	AddColumnTemplates         []*Template
+	TagTableCreateTemplates    []*Template
+	TagTableAddColumnTemplates []*Template
+	TagTableSuffix             string
+	PoolSize                   int
 
 	dbContext       context.Context
 	dbContextCancel func()
 	db              *pgxpool.Pool
-	tables          *tables.TableManager
-	tagTables       *tables.TableManager
+	tableManager    *TableManager
 
 	writeChan chan *RowSource
 }
@@ -44,10 +42,12 @@ const createTableTemplate = "CREATE TABLE IF NOT EXISTS {TABLE}({COLUMNS})"
 
 func newPostgresql() *Postgresql {
 	return &Postgresql{
-		Schema:          "public",
-		TableTemplate:   createTableTemplate,
-		TagTableSuffix:  "_tag",
-		DoSchemaUpdates: true,
+		Schema:                     "public",
+		CreateTemplates:            []*Template{TableCreateTemplate},
+		AddColumnTemplates:         []*Template{TableAddColumnTemplate},
+		TagTableCreateTemplates:    []*Template{TableCreateTemplate},
+		TagTableAddColumnTemplates: []*Template{TableAddColumnTemplate},
+		TagTableSuffix:             "_tag",
 	}
 }
 
@@ -58,8 +58,6 @@ func (p *Postgresql) Connect() error {
 		return err
 	}
 
-	poolConfig.AfterConnect = p.dbConnectedHook
-
 	// Yes, we're not supposed to store the context. However since we don't receive a context, we have to.
 	p.dbContext, p.dbContextCancel = context.WithCancel(context.Background())
 	p.db, err = pgxpool.ConnectConfig(p.dbContext, poolConfig)
@@ -67,10 +65,7 @@ func (p *Postgresql) Connect() error {
 		log.Printf("E! Couldn't connect to server\n%v", err)
 		return err
 	}
-	p.tables = tables.NewManager(p.db, p.Schema, p.TableTemplate)
-	if p.TagsAsForeignkeys {
-		p.tagTables = tables.NewManager(p.db, p.Schema, createTableTemplate)
-	}
+	p.tableManager = NewTableManager(p)
 
 	maxConns := int(p.db.Stat().MaxConns())
 	if maxConns > 1 {
@@ -85,7 +80,7 @@ func (p *Postgresql) Connect() error {
 
 // dbConnectHook checks to see whether we lost all connections, and if so resets any known state of the database (e.g. cached tables).
 func (p *Postgresql) dbConnectedHook(ctx context.Context, conn *pgx.Conn) error {
-	if p.db == nil || p.tables == nil {
+	if p.db == nil || p.tableManager == nil {
 		// This will happen on the initial connect since we haven't set it yet.
 		// Also meaning there is no state to reset.
 		return nil
@@ -96,17 +91,14 @@ func (p *Postgresql) dbConnectedHook(ctx context.Context, conn *pgx.Conn) error 
 		return nil
 	}
 
-	p.tables.ClearTableCache()
-	if p.tagTables != nil {
-		p.tagTables.ClearTableCache()
-	}
+	p.tableManager.ClearTableCache()
 
 	return nil
 }
 
 // Close closes the connection to the database
 func (p *Postgresql) Close() error {
-	p.tables = nil
+	p.tableManager = nil
 	p.dbContextCancel()
 	p.db.Close()
 	return nil
@@ -245,36 +237,13 @@ func (p *Postgresql) writeRetry(ctx context.Context, rowSource *RowSource) error
 
 // Writes the metrics from a specified measure. All the provided metrics must belong to the same measurement.
 func (p *Postgresql) writeMetricsFromMeasure(ctx context.Context, rowSource *RowSource) error {
-	targetColumns := rowSource.Columns()
-	targetTagColumns := rowSource.TagColumns()
-	measureName := rowSource.Name()
-
-	missingColumns, err := p.tables.EnsureStructure(ctx, measureName, targetColumns, p.DoSchemaUpdates)
+	err := p.tableManager.MatchSource(ctx, rowSource)
 	if err != nil {
-		return fmt.Errorf("validating table '%s': %w", measureName, err)
-	}
-	if p.TagsAsForeignkeys {
-		tagTableName := measureName + p.TagTableSuffix
-		if _, err := p.tagTables.EnsureStructure(ctx, tagTableName, targetTagColumns, true); err != nil {
-			return fmt.Errorf("validating table '%s': %w", tagTableName, err)
-		}
+		return err
 	}
 
-	if missingColumns != nil {
-		for _, col := range missingColumns {
-			if col.Role != utils.FieldColType {
-				return fmt.Errorf("table '%s' missing critical column: %s %s", measureName, col.Name, col.Type)
-			}
-			rowSource.DropFieldColumn(col)
-			targetColumns = rowSource.Columns()
-		}
-
-		colSpecs := make([]string, len(missingColumns))
-		for i, col := range missingColumns {
-			colSpecs[i] = col.Name + " " + string(col.Type)
-		}
-		log.Printf("[outputs.postgresql] Error: Table '%s' missing columns (fields dropped): %s", measureName, strings.Join(colSpecs, ", "))
-	}
+	targetColumns := rowSource.Columns()
+	measureName := rowSource.Name()
 
 	columnPositions := make(map[string]int, len(targetColumns))
 	columnNames := make([]string, len(targetColumns))

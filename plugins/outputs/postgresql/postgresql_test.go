@@ -72,7 +72,7 @@ func prepareAllColumnsInOnePlaceNoJSON() (*Postgresql, []telegraf.Metric, map[st
 	return &Postgresql{
 			TagTableSuffix:  "_tag",
 			DoSchemaUpdates: true,
-			tables:          &mockTables{t: map[string]bool{"m": true}, missingCols: []int{}},
+			tableManager:    &mockTables{t: map[string]bool{"m": true}, missingCols: []int{}},
 			rows:            &mockTransformer{rows: [][]interface{}{nil, nil, nil}},
 			columns:         columns.NewMapper(false, false, false),
 			db:              &mockDb{},
@@ -96,7 +96,7 @@ func prepareAllColumnsInOnePlaceTagsAndFieldsJSON() (*Postgresql, []telegraf.Met
 			TagsAsJsonb:       true,
 			FieldsAsJsonb:     true,
 			dbConnLock:        sync.Mutex{},
-			tables:            &mockTables{t: map[string]bool{"m": true}, missingCols: []int{}},
+			tableManager:      &mockTables{t: map[string]bool{"m": true}, missingCols: []int{}},
 			columns:           columns.NewMapper(false, true, true),
 			rows:              &mockTransformer{rows: [][]interface{}{nil, nil, nil}},
 			db:                &mockDb{},

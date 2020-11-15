@@ -1,4 +1,4 @@
-package columns
+package postgresql
 
 import "github.com/influxdata/telegraf/plugins/outputs/postgresql/utils"
 

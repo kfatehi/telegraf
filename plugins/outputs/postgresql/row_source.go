@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	"github.com/influxdata/telegraf"
-	"github.com/influxdata/telegraf/plugins/outputs/postgresql/columns"
 	"github.com/influxdata/telegraf/plugins/outputs/postgresql/utils"
 )
 
@@ -59,7 +58,7 @@ func (rs *RowSource) AddMetric(metric telegraf.Metric) {
 			tags := metric.TagList()
 			values := make([]interface{}, len(tags))
 			for i, tag := range tags {
-				values[i] = columns.ColumnFromTag(tag.Key, tag.Value)
+				values[i] = ColumnFromTag(tag.Key, tag.Value)
 			}
 			rs.tagSets[tagID] = values
 		}
@@ -69,7 +68,7 @@ func (rs *RowSource) AddMetric(metric telegraf.Metric) {
 		for _, t := range metric.TagList() {
 			if _, ok := rs.tagPositions[t.Key]; !ok {
 				rs.tagPositions[t.Key] = len(rs.tagPositions)
-				rs.tagColumns = append(rs.tagColumns, columns.ColumnFromTag(t.Key, t.Value))
+				rs.tagColumns = append(rs.tagColumns, ColumnFromTag(t.Key, t.Value))
 			}
 		}
 	}
@@ -78,7 +77,7 @@ func (rs *RowSource) AddMetric(metric telegraf.Metric) {
 		for _, f := range metric.FieldList() {
 			if _, ok := rs.fieldPositions[f.Key]; !ok {
 				rs.fieldPositions[f.Key] = len(rs.fieldPositions)
-				rs.fieldColumns = append(rs.fieldColumns, columns.ColumnFromField(f.Key, f.Value))
+				rs.fieldColumns = append(rs.fieldColumns, ColumnFromField(f.Key, f.Value))
 			}
 		}
 	}
@@ -97,11 +96,11 @@ func (rs *RowSource) TagColumns() []utils.Column {
 	var cols []utils.Column
 
 	if rs.postgresql.TagsAsForeignkeys {
-		cols = append(cols, columns.TagIDColumn)
+		cols = append(cols, TagIDColumn)
 	}
 
 	if rs.postgresql.TagsAsJsonb {
-		cols = append(cols, columns.TagsJSONColumn)
+		cols = append(cols, TagsJSONColumn)
 	} else {
 		cols = append(cols, rs.tagColumns...)
 	}
@@ -111,17 +110,17 @@ func (rs *RowSource) TagColumns() []utils.Column {
 
 func (rs *RowSource) Columns() []utils.Column {
 	cols := []utils.Column{
-		columns.TimeColumn,
+		TimeColumn,
 	}
 
 	if rs.postgresql.TagsAsForeignkeys {
-		cols = append(cols, columns.TagIDColumn)
+		cols = append(cols, TagIDColumn)
 	} else {
 		cols = append(cols, rs.TagColumns()...)
 	}
 
 	if rs.postgresql.FieldsAsJsonb {
-		cols = append(cols, columns.FieldsJSONColumn)
+		cols = append(cols, FieldsJSONColumn)
 	} else {
 		cols = append(cols, rs.fieldColumns...)
 	}
@@ -158,6 +157,9 @@ func (rs *RowSource) Next() bool {
 	if rs.cursor+1 >= len(rs.metrics) {
 		return false
 	}
+	//TODO check if all fields were dropped and if so, skip to next.
+	// This can happen if schema updates are disabled and the table is missing all the requisite columns.
+	// We could also use this to skip when any of the tag columns are missing. Currently this is detected in MatchSource and we throw an error.
 	rs.cursor += 1
 	return true
 }

@@ -5,9 +5,11 @@ import (
 	"testing"
 
 	"github.com/influxdata/telegraf/plugins/outputs/postgresql/db"
-	"github.com/influxdata/telegraf/plugins/outputs/postgresql/utils"
 	"github.com/jackc/pgx"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/influxdata/telegraf/plugins/outputs/postgresql"
+	"github.com/influxdata/telegraf/plugins/outputs/postgresql/utils"
 )
 
 type mockDb struct {
@@ -35,7 +37,7 @@ func (m *mockDb) IsAlive() bool { return true }
 
 func TestNewManager(t *testing.T) {
 	db := &mockDb{}
-	res := NewManager(db, "schema", "table template").(*TableManager)
+	res := postgresql.NewTableManager(db, "schema", "table template").(*postgresql.TableManager)
 	assert.Equal(t, "table template", res.tableTemplate)
 	assert.Equal(t, "schema", res.schema)
 	assert.Equal(t, db, res.db)
@@ -77,7 +79,7 @@ func TestExists(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.desc, func(t *testing.T) {
-			manager := &TableManager{
+			manager := &postgresql.TableManager{
 				Tables: tc.cache,
 				db:     tc.db,
 			}
@@ -126,7 +128,7 @@ func TestCreateTable(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.desc, func(t *testing.T) {
-			manager := &TableManager{
+			manager := &postgresql.TableManager{
 				Tables:        map[string]bool{},
 				db:            tc.db,
 				tableTemplate: tc.template,
