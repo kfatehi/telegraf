@@ -36,9 +36,7 @@ type RowSource struct {
 	// tagSets is the list of tag IDs to tag values in use within the RowSource. The position of each value in the list
 	// corresponds to the key name in the tagColumns list.
 	// This data is used to build out the foreign tag table when enabled.
-	// Technically the tag values will only contain strings, since all tag values are strings. But this is a restriction of telegraf
-	// metrics, and not postgres. It might be nice to support somehow converting tag values into native times.
-	tagSets map[int64][]interface{}
+	tagSets map[int64][]*telegraf.Tag
 
 	// fieldPositions is the position of each field within the tag set.
 	fieldPositions map[string]int
@@ -52,7 +50,7 @@ func NewRowSource(postgresql *Postgresql) *RowSource {
 	rs := &RowSource{
 		postgresql: postgresql,
 		cursor:     -1,
-		tagSets:    make(map[int64][]interface{}),
+		tagSets:    make(map[int64][]*telegraf.Tag),
 	}
 	if !postgresql.FieldsAsJsonb {
 		rs.tagPositions = map[string]int{}
@@ -65,12 +63,7 @@ func (rs *RowSource) AddMetric(metric telegraf.Metric) {
 	if rs.postgresql.TagsAsForeignkeys {
 		tagID := utils.GetTagID(metric)
 		if _, ok := rs.tagSets[tagID]; !ok {
-			tags := metric.TagList()
-			values := make([]interface{}, len(tags))
-			for i, tag := range tags {
-				values[i] = ColumnFromTag(tag.Key, tag.Value)
-			}
-			rs.tagSets[tagID] = values
+			rs.tagSets[tagID] = metric.TagList()
 		}
 	}
 
@@ -106,10 +99,6 @@ func (rs *RowSource) Name() string {
 func (rs *RowSource) TagColumns() []utils.Column {
 	var cols []utils.Column
 
-	if rs.postgresql.TagsAsForeignkeys {
-		cols = append(cols, TagIDColumn)
-	}
-
 	if rs.postgresql.TagsAsJsonb {
 		cols = append(cols, TagsJSONColumn)
 	} else {
@@ -119,8 +108,13 @@ func (rs *RowSource) TagColumns() []utils.Column {
 	return cols
 }
 
-// Returns the superset of the union of all tags+fields of all metrics.
-func (rs *RowSource) Columns() []utils.Column {
+// Returns the superset of all fields of all metrics.
+func (rs *RowSource) FieldColumns() []utils.Column {
+	return rs.fieldColumns
+}
+
+// Returns the full column list, including time, tag id or tags, and fields.
+func (rs *RowSource) MetricTableColumns() []utils.Column {
 	cols := []utils.Column{
 		TimeColumn,
 	}
@@ -134,10 +128,29 @@ func (rs *RowSource) Columns() []utils.Column {
 	if rs.postgresql.FieldsAsJsonb {
 		cols = append(cols, FieldsJSONColumn)
 	} else {
-		cols = append(cols, rs.fieldColumns...)
+		cols = append(cols, rs.FieldColumns()...)
 	}
 
 	return cols
+}
+
+func (rs *RowSource) TagTableColumns() []utils.Column {
+	cols := []utils.Column{
+		TagIDColumn,
+	}
+
+	cols = append(cols, rs.TagColumns()...)
+
+	return cols
+}
+
+func (rs *RowSource) ColumnNames() []string {
+	cols := rs.MetricTableColumns()
+	names := make([]string, len(cols))
+	for i, col := range cols {
+		names[i] = col.Name
+	}
+	return names
 }
 
 func (rs *RowSource) DropColumn(col utils.Column) {
@@ -173,12 +186,12 @@ func (rs *RowSource) dropTagColumn(col utils.Column) {
 	rs.tagColumns = append(rs.tagColumns[:pos], rs.tagColumns[pos+1:]...)
 
 	for setID, set := range rs.tagSets {
-		if set[pos] != nil {
-			// The tag is defined, so drop the whole set
-			delete(rs.tagSets, setID)
-		} else {
-			// The tag is null, so keep the set, and just drop the column so we don't try to use it.
-			rs.tagSets[setID] = append(set, set[:pos], set[pos+1:])
+		for _, tag := range set {
+			if tag.Key == col.Name {
+				// The tag is defined, so drop the whole set
+				delete(rs.tagSets, setID)
+				break
+			}
 		}
 	}
 }
@@ -250,11 +263,7 @@ func (rs *RowSource) values() ([]interface{}, error) {
 			values = append(values, tagValues...)
 		} else {
 			// tags_as_foreign_key=false, tags_as_json=true
-			value, err := utils.BuildJsonb(metric.Tags())
-			if err != nil {
-				return nil, err
-			}
-			values = append(values, value)
+			values = append(values, utils.TagListToJSON(metric.TagList()))
 		}
 	} else {
 		// tags_as_foreignkey=true
@@ -284,7 +293,7 @@ func (rs *RowSource) values() ([]interface{}, error) {
 		values = append(values, fieldValues...)
 	} else {
 		// fields_as_json=true
-		value, err := utils.BuildJsonb(metric.Fields())
+		value, err := utils.FieldListToJSON(metric.FieldList())
 		if err != nil {
 			return nil, err
 		}

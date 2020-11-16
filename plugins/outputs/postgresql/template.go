@@ -13,6 +13,7 @@ import (
 
 var TableCreateTemplate = newTemplate(`CREATE TABLE {{.table}} ({{.columns}})`)
 var TableAddColumnTemplate = newTemplate(`ALTER TABLE {{.table}} ADD COLUMN IF NOT EXISTS {{.columns|join ", ADD COLUMN IF NOT EXISTS "}}`)
+var TagTableCreateTemplate = newTemplate(`CREATE TABLE {{.table}} ({{.columns}}, PRIMARY KEY (tag_id))`)
 
 var templateFuncs = map[string]interface{}{
 	"quoteIdentifier": QuoteIdentifier,

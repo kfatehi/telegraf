@@ -2,7 +2,9 @@ package postgresql
 
 import (
 	"context"
+	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v4"
@@ -45,7 +47,7 @@ func newPostgresql() *Postgresql {
 		Schema:                     "public",
 		CreateTemplates:            []*Template{TableCreateTemplate},
 		AddColumnTemplates:         []*Template{TableAddColumnTemplate},
-		TagTableCreateTemplates:    []*Template{TableCreateTemplate},
+		TagTableCreateTemplates:    []*Template{TagTableCreateTemplate},
 		TagTableAddColumnTemplates: []*Template{TableAddColumnTemplate},
 		TagTableSuffix:             "_tag",
 	}
@@ -242,17 +244,60 @@ func (p *Postgresql) writeMetricsFromMeasure(ctx context.Context, rowSource *Row
 		return err
 	}
 
-	targetColumns := rowSource.Columns()
-	measureName := rowSource.Name()
-
-	columnPositions := make(map[string]int, len(targetColumns))
-	columnNames := make([]string, len(targetColumns))
-	for i, col := range targetColumns {
-		columnPositions[col.Name] = i
-		columnNames[i] = col.Name
+	if err := p.WriteTagTable(ctx, rowSource); err != nil {
+		// log and continue. As the admin can correct the issue, and tags don't change over time, they can be added from
+		// future metrics after issue is corrected.
+		log.Printf("[outputs.postgresql] Error: Writing to tag table '%s': %w", rowSource.Name()+p.TagTableSuffix, err)
 	}
 
-	fullTableName := utils.FullTableName(p.Schema, measureName)
-	_, err = p.db.CopyFrom(ctx, fullTableName, columnNames, rowSource)
+	fullTableName := utils.FullTableName(p.Schema, rowSource.Name())
+	_, err = p.db.CopyFrom(ctx, fullTableName, rowSource.ColumnNames(), rowSource)
 	return err
+}
+
+func (p *Postgresql) WriteTagTable(ctx context.Context, rowSource *RowSource) error {
+	tagCols := rowSource.TagTableColumns()
+
+	columnNames := make([]string, len(tagCols))
+	placeholders := make([]string, len(tagCols))
+	for i, col := range tagCols {
+		columnNames[i] = QuoteIdentifier(col.Name)
+		placeholders[i] = fmt.Sprintf("$%d", i+1)
+	}
+
+	// pgx batch code will automatically convert this into a prepared statement & cache it
+	sql := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s) ON CONFLICT (tag_id) DO NOTHING",
+		rowSource.Name()+p.TagTableSuffix,
+		strings.Join(columnNames, ","),
+		strings.Join(placeholders, ","),
+	)
+
+	batch := &pgx.Batch{}
+	//TODO rowSource should emit another source for the tags. We shouldn't have to dive into its private methods.
+	//TODO cache which tagSets we've already inserted and skip them.
+	//TODO copy into a temp table, and then `insert ... on conflict` from that into the tag table.
+	for tagID, tagSet := range rowSource.tagSets {
+		values := make([]interface{}, len(columnNames))
+		values[0] = tagID
+
+		if !p.TagsAsJsonb {
+			for _, tag := range tagSet {
+				values[rowSource.tagPositions[tag.Key]+1] = tag.Value // +1 to account for tag_id column
+			}
+		} else {
+			values[1] = utils.TagListToJSON(tagSet)
+		}
+
+		batch.Queue(sql, values...)
+	}
+	results := p.db.SendBatch(ctx, batch)
+	defer results.Close()
+
+	for i := 0; i < len(rowSource.tagSets); i++ {
+		if _, err := results.Exec(); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }

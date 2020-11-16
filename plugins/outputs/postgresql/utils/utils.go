@@ -17,14 +17,21 @@ const (
 	insertIntoSQLTemplate = "INSERT INTO %s(%s) VALUES(%s)"
 )
 
-// BuildJsonb returns a byte array of the json representation
-// of the passed object.
-func BuildJsonb(data interface{}) ([]byte, error) {
-	d, err := json.Marshal(data)
-	if err != nil {
-		return nil, err
+func TagListToJSON(tagList []*telegraf.Tag) []byte {
+	tags := make(map[string]string, len(tagList))
+	for _, tag := range tagList {
+		tags[tag.Key] = tag.Value
 	}
-	return d, nil
+	bs, _ := json.Marshal(tags)
+	return bs
+}
+
+func FieldListToJSON(fieldList []*telegraf.Field) ([]byte, error) {
+	fields := make(map[string]interface{}, len(fieldList))
+	for _, field := range fieldList {
+		fields[field.Key] = field.Value
+	}
+	return json.Marshal(fields)
 }
 
 // QuoteIdent returns a sanitized string safe to use in SQL as an identifier

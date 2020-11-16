@@ -213,20 +213,24 @@ func colMapToSlice(colMap map[string]utils.Column) []utils.Column {
 	return cols
 }
 
+// MatchSource scans through the metrics, determining what columns are needed for inserting, and ensuring the DB schema matches.
+// If the schema does not match, and schema updates are disabled:
+//   If a field missing from the DB, the field is omitted.
+//   If a tag is missing from the DB, the metric is dropped.
 func (tm *TableManager) MatchSource(ctx context.Context, rowSource *RowSource) error {
-	metricsTableName := rowSource.Name()
-	var tagsTableName string
+	metricTableName := rowSource.Name()
+	var tagTableName string
 	if tm.TagsAsForeignkeys {
-		tagsTableName = metricsTableName + tm.TagTableSuffix
+		tagTableName = metricTableName + tm.TagTableSuffix
 
 		missingCols, err := tm.EnsureStructure(
 			ctx,
-			tagsTableName,
-			rowSource.TagColumns(),
+			tagTableName,
+			rowSource.TagTableColumns(),
 			tm.TagTableCreateTemplates,
 			tm.TagTableAddColumnTemplates,
-			metricsTableName,
-			tagsTableName,
+			metricTableName,
+			tagTableName,
 		)
 		if err != nil {
 			return err
@@ -238,17 +242,17 @@ func (tm *TableManager) MatchSource(ctx context.Context, rowSource *RowSource) e
 				rowSource.DropColumn(col)
 				colDefs[i] = col.Name + " " + string(col.Type)
 			}
-			log.Printf("[outputs.postgresql] Error: table '%s' is missing tag columns (dropping metrics): %s", tagsTableName, strings.Join(colDefs, ", "))
+			log.Printf("[outputs.postgresql] Error: table '%s' is missing tag columns (dropping metrics): %s", tagTableName, strings.Join(colDefs, ", "))
 		}
 	}
 
 	missingCols, err := tm.EnsureStructure(ctx,
-		metricsTableName,
-		rowSource.Columns(),
+		metricTableName,
+		rowSource.MetricTableColumns(),
 		tm.CreateTemplates,
 		tm.AddColumnTemplates,
-		metricsTableName,
-		tagsTableName,
+		metricTableName,
+		tagTableName,
 	)
 	if err != nil {
 		return err
@@ -260,7 +264,7 @@ func (tm *TableManager) MatchSource(ctx context.Context, rowSource *RowSource) e
 			rowSource.DropColumn(col)
 			colDefs[i] = col.Name + " " + string(col.Type)
 		}
-		log.Printf("[outputs.postgresql] Error: table '%s' is missing columns (dropping fields): %s", metricsTableName, strings.Join(colDefs, ", "))
+		log.Printf("[outputs.postgresql] Error: table '%s' is missing columns (dropping fields): %s", metricTableName, strings.Join(colDefs, ", "))
 	}
 
 	return nil
