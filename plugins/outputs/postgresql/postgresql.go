@@ -170,11 +170,11 @@ func (p *Postgresql) writeSequential(rowSources map[string]*RowSource) error {
 	for _, rowSource := range rowSources {
 		err := p.writeMetricsFromMeasure(p.dbContext, rowSource)
 		if err != nil {
-			if !isTempError(err) {
-				log.Printf("write error (permanent): %v", err)
+			if isTempError(err) {
+				//TODO use a transaction so that we don't end up with a partial write, and end up retrying metrics we've already written
+				return err
 			}
-			//TODO use a transaction so that we don't end up with a partial write, and end up retrying metrics we've already written
-			return err
+			log.Printf("write error (permanent, dropping sub-batch): %v", err)
 		}
 	}
 	return nil
@@ -196,7 +196,7 @@ func (p *Postgresql) writeWorker(ctx context.Context) {
 		select {
 		case rowSource := <-p.writeChan:
 			if err := p.writeRetry(ctx, rowSource); err != nil {
-				log.Printf("write error (permanent): %v", err)
+				log.Printf("write error (permanent, dropping sub-batch): %v", err)
 			}
 		case <-p.dbContext.Done():
 			return
