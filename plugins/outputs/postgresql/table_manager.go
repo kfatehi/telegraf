@@ -76,6 +76,11 @@ func (tm *TableManager) EnsureStructure(
 	metricsTableName string,
 	tagsTableName string,
 ) ([]utils.Column, error) {
+	// Sort so that:
+	//   * When we create/alter the table the columns are in a sane order (telegraf gives us the fields in random order)
+	//   * When we display errors about missing columns, the order is also sane, and consistent
+	utils.ColumnList(columns).Sort()
+
 	tm.tablesMutex.RLock()
 	dbColumns, ok := tm.Tables[tableName]
 	tm.tablesMutex.RUnlock()
@@ -127,12 +132,6 @@ func (tm *TableManager) checkColumns(dbColumns map[string]utils.Column, srcColum
 		if !utils.PgTypeCanContain(dbCol.Type, srcCol.Type) {
 			return nil, fmt.Errorf("column type '%s' cannot store '%s'", dbCol.Type, srcCol.Type)
 		}
-	}
-	if len(missingColumns) > 0 {
-		// Sort so that:
-		//   * When we create/alter the table the columns are in a sane order (telegraf gives us the fields in random order)
-		//   * When we display errors about missing columns, the order is also sane, and consistent
-		utils.ColumnList(missingColumns).Sort()
 	}
 	return missingColumns, nil
 }
