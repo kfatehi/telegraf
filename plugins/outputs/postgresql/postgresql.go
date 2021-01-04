@@ -2,7 +2,11 @@ package postgresql
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"github.com/influxdata/telegraf/internal"
+	"github.com/influxdata/telegraf/plugins/outputs/postgresql/template"
+	"github.com/jackc/pgconn"
 	"log"
 	"strings"
 	"time"
@@ -21,12 +25,13 @@ type Postgresql struct {
 	TagsAsForeignkeys          bool
 	TagsAsJsonb                bool
 	FieldsAsJsonb              bool
-	CreateTemplates            []*Template
-	AddColumnTemplates         []*Template
-	TagTableCreateTemplates    []*Template
-	TagTableAddColumnTemplates []*Template
+	CreateTemplates            []*template.Template
+	AddColumnTemplates         []*template.Template
+	TagTableCreateTemplates    []*template.Template
+	TagTableAddColumnTemplates []*template.Template
 	TagTableSuffix             string
 	PoolSize                   int
+	RetryMaxBackoff            internal.Duration
 
 	dbContext       context.Context
 	dbContextCancel func()
@@ -40,16 +45,15 @@ func init() {
 	outputs.Add("postgresql", func() telegraf.Output { return newPostgresql() })
 }
 
-const createTableTemplate = "CREATE TABLE IF NOT EXISTS {TABLE}({COLUMNS})"
-
 func newPostgresql() *Postgresql {
 	return &Postgresql{
 		Schema:                     "public",
-		CreateTemplates:            []*Template{TableCreateTemplate},
-		AddColumnTemplates:         []*Template{TableAddColumnTemplate},
-		TagTableCreateTemplates:    []*Template{TagTableCreateTemplate},
-		TagTableAddColumnTemplates: []*Template{TableAddColumnTemplate},
+		CreateTemplates:            []*template.Template{template.TableCreateTemplate},
+		AddColumnTemplates:         []*template.Template{template.TableAddColumnTemplate},
+		TagTableCreateTemplates:    []*template.Template{template.TagTableCreateTemplate},
+		TagTableAddColumnTemplates: []*template.Template{template.TableAddColumnTemplate},
 		TagTableSuffix:             "_tag",
+		RetryMaxBackoff:            internal.Duration{time.Second * 15},
 	}
 }
 
@@ -205,11 +209,12 @@ func (p *Postgresql) writeWorker(ctx context.Context) {
 }
 
 func isTempError(err error) bool {
-	return false
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr); pgErr != nil {
+		return false
+	}
+	return true
 }
-
-var backoffInit = time.Millisecond * 250
-var backoffMax = time.Second * 15
 
 func (p *Postgresql) writeRetry(ctx context.Context, rowSource *RowSource) error {
 	backoff := time.Duration(0)
@@ -227,11 +232,11 @@ func (p *Postgresql) writeRetry(ctx context.Context, rowSource *RowSource) error
 		time.Sleep(backoff)
 
 		if backoff == 0 {
-			backoff = backoffInit
+			backoff = time.Millisecond * 250
 		} else {
 			backoff *= 2
-			if backoff > backoffMax {
-				backoff = backoffMax
+			if backoff > p.RetryMaxBackoff.Duration {
+				backoff = p.RetryMaxBackoff.Duration
 			}
 		}
 	}
@@ -244,10 +249,12 @@ func (p *Postgresql) writeMetricsFromMeasure(ctx context.Context, rowSource *Row
 		return err
 	}
 
-	if err := p.WriteTagTable(ctx, rowSource); err != nil {
-		// log and continue. As the admin can correct the issue, and tags don't change over time, they can be added from
-		// future metrics after issue is corrected.
-		log.Printf("[outputs.postgresql] Error: Writing to tag table '%s': %w", rowSource.Name()+p.TagTableSuffix, err)
+	if p.TagsAsForeignkeys {
+		if err := p.WriteTagTable(ctx, rowSource); err != nil {
+			// log and continue. As the admin can correct the issue, and tags don't change over time, they can be added from
+			// future metrics after issue is corrected.
+			log.Printf("[outputs.postgresql] Error: Writing to tag table '%s': %s", rowSource.Name()+p.TagTableSuffix, err)
+		}
 	}
 
 	fullTableName := utils.FullTableName(p.Schema, rowSource.Name())
@@ -261,13 +268,13 @@ func (p *Postgresql) WriteTagTable(ctx context.Context, rowSource *RowSource) er
 	columnNames := make([]string, len(tagCols))
 	placeholders := make([]string, len(tagCols))
 	for i, col := range tagCols {
-		columnNames[i] = QuoteIdentifier(col.Name)
+		columnNames[i] = template.QuoteIdentifier(col.Name)
 		placeholders[i] = fmt.Sprintf("$%d", i+1)
 	}
 
 	// pgx batch code will automatically convert this into a prepared statement & cache it
 	sql := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s) ON CONFLICT (tag_id) DO NOTHING",
-		rowSource.Name()+p.TagTableSuffix,
+		template.QuoteIdentifier(p.Schema)+"."+template.QuoteIdentifier(rowSource.Name()+p.TagTableSuffix),
 		strings.Join(columnNames, ","),
 		strings.Join(placeholders, ","),
 	)

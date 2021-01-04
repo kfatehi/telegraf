@@ -1,10 +1,13 @@
-package postgresql
+package template
 
 import (
 	"bytes"
+	"encoding/base32"
 	"fmt"
+	"hash/fnv"
 	"strings"
 	"text/template"
+	"unsafe"
 
 	"github.com/influxdata/telegraf/plugins/outputs/postgresql/utils"
 
@@ -35,7 +38,7 @@ func asString(obj interface{}) string {
 func QuoteIdentifier(name interface{}) string {
 	return `"` + strings.ReplaceAll(asString(name), `"`, `""`) + `"`
 }
-func QuoteLiteral(str fmt.Stringer) string {
+func QuoteLiteral(str interface{}) string {
 	return "'" + strings.ReplaceAll(asString(str), "'", "''") + "'"
 }
 
@@ -66,7 +69,28 @@ func (tt *TemplateTable) String() string {
 	return tt.Identifier()
 }
 func (tt *TemplateTable) Identifier() string {
+	if tt.Schema == "" {
+		return QuoteIdentifier(tt.Name)
+	}
 	return QuoteIdentifier(tt.Schema) + "." + QuoteIdentifier(tt.Name)
+}
+func (tt *TemplateTable) WithSchema(name string) *TemplateTable {
+	ttNew := &TemplateTable{}
+	*ttNew = *tt
+	ttNew.Schema = name
+	return ttNew
+}
+func (tt *TemplateTable) WithName(name string) *TemplateTable {
+	ttNew := &TemplateTable{}
+	*ttNew = *tt
+	ttNew.Name = name
+	return ttNew
+}
+func (tt *TemplateTable) WithSuffix(suffixes ...string) *TemplateTable {
+	ttNew := &TemplateTable{}
+	*ttNew = *tt
+	ttNew.Name += strings.Join(suffixes, "")
+	return ttNew
 }
 
 //func (tt *TemplateTable) Literal() string {
@@ -83,6 +107,12 @@ func (tc TemplateColumn) Definition() string {
 }
 func (tc TemplateColumn) Identifier() string {
 	return QuoteIdentifier(tc.Name)
+}
+func (tc TemplateColumn) Selector() string {
+	if tc.Type != "" {
+		return tc.Identifier()
+	}
+	return "NULL as " + tc.Identifier()
 }
 func (tc TemplateColumn) IsTag() bool {
 	return tc.Role == utils.TagColType
@@ -120,9 +150,17 @@ func (tcs TemplateColumns) Definitions() []string {
 func (tcs TemplateColumns) Identifiers() []string {
 	idents := make([]string, len(tcs))
 	for i, tc := range tcs {
-		idents[i] = QuoteIdentifier(tc.Name)
+		idents[i] = tc.Identifier()
 	}
 	return idents
+}
+
+func (tcs TemplateColumns) Selectors() []string {
+	selectors := make([]string, len(tcs))
+	for i, tc := range tcs {
+		selectors[i] = tc.Selector()
+	}
+	return selectors
 }
 
 func (tcs TemplateColumns) String() string {
@@ -143,10 +181,40 @@ func (tcs TemplateColumns) Keys() TemplateColumns {
 	return cols
 }
 
+func (tcs TemplateColumns) Sorted() TemplateColumns {
+	cols := append([]TemplateColumn{}, tcs...)
+	(*utils.ColumnList)(unsafe.Pointer(&cols)).Sort()
+	return cols
+}
+
+func (tcs TemplateColumns) Concat(tcsList ...TemplateColumns) TemplateColumns {
+	tcsNew := append(TemplateColumns{}, tcs...)
+	for _, tcs := range tcsList {
+		tcsNew = append(tcsNew, tcs...)
+	}
+	return tcsNew
+}
+
+// Generates a list of SQL selectors against the given columns.
+// For each column in tcs, if the column also exist in tcsFrom, it will be selected. If the column does not exist NULL will be selected.
+func (tcs TemplateColumns) Union(tcsFrom TemplateColumns) TemplateColumns {
+	tcsNew := append(TemplateColumns{}, tcs...)
+TCS:
+	for i, tc := range tcs {
+		for _, tcFrom := range tcsFrom {
+			if tc.Name == tcFrom.Name {
+				continue TCS
+			}
+		}
+		tcsNew[i].Type = ""
+	}
+	return tcsNew
+}
+
 func (tcs TemplateColumns) Tags() TemplateColumns {
 	var cols []TemplateColumn
 	for _, tc := range tcs {
-		if tc.Role == utils.TagColType || tc.Role == utils.TagsIDColType {
+		if tc.Role == utils.TagColType {
 			cols = append(cols, tc)
 		}
 	}
@@ -163,6 +231,15 @@ func (tcs TemplateColumns) Fields() TemplateColumns {
 	return cols
 }
 
+func (tcs TemplateColumns) Hash() string {
+	hash := fnv.New32a()
+	for _, tc := range tcs.Sorted() {
+		hash.Write([]byte(tc.Name))
+		hash.Write([]byte{0})
+	}
+	return strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(hash.Sum(nil)))
+}
+
 type Template template.Template
 
 func newTemplate(templateString string) *Template {
@@ -175,6 +252,7 @@ func newTemplate(templateString string) *Template {
 
 func (t *Template) UnmarshalText(text []byte) error {
 	tmpl := template.New("")
+	tmpl.Option("missingkey=error")
 	tmpl.Funcs(templateFuncs)
 	tmpl.Funcs(sprig.TxtFuncMap())
 	tt, err := tmpl.Parse(string(text))
@@ -186,9 +264,11 @@ func (t *Template) UnmarshalText(text []byte) error {
 }
 
 func (t *Template) Render(table *TemplateTable, newColumns []utils.Column, metricTable *TemplateTable, tagTable *TemplateTable) ([]byte, error) {
+	tcs := NewTemplateColumns(newColumns).Sorted()
 	data := map[string]interface{}{
 		"table":       table,
-		"columns":     NewTemplateColumns(newColumns),
+		"columns":     tcs,
+		"allColumns":  tcs.Concat(table.Columns).Sorted(),
 		"metricTable": metricTable,
 		"tagTable":    tagTable,
 	}

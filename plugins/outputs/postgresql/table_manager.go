@@ -3,6 +3,7 @@ package postgresql
 import (
 	"context"
 	"fmt"
+	"github.com/influxdata/telegraf/plugins/outputs/postgresql/template"
 	"log"
 	"strings"
 	"sync"
@@ -93,8 +94,8 @@ func (tm *TableManager) EnsureStructure(
 	ctx context.Context,
 	tableName string,
 	columns []utils.Column,
-	createTemplates []*Template,
-	addColumnsTemplates []*Template,
+	createTemplates []*template.Template,
+	addColumnsTemplates []*template.Template,
 	metricsTableName string,
 	tagsTableName string,
 ) ([]utils.Column, error) {
@@ -160,15 +161,15 @@ func (tm *TableManager) checkColumns(dbColumns map[string]utils.Column, srcColum
 
 func (tm *TableManager) executeTemplates(
 	ctx context.Context,
-	tmpls []*Template,
+	tmpls []*template.Template,
 	tableName string,
 	newColumns []utils.Column,
 	metricsTableName string,
 	tagsTableName string,
 ) error {
-	tmplTable := NewTemplateTable(tm.Schema, tableName, colMapToSlice(tm.Tables[tableName]))
-	metricsTmplTable := NewTemplateTable(tm.Schema, metricsTableName, colMapToSlice(tm.Tables[metricsTableName]))
-	tagsTmplTable := NewTemplateTable(tm.Schema, tagsTableName, colMapToSlice(tm.Tables[tagsTableName]))
+	tmplTable := template.NewTemplateTable(tm.Schema, tableName, colMapToSlice(tm.Tables[tableName]))
+	metricsTmplTable := template.NewTemplateTable(tm.Schema, metricsTableName, colMapToSlice(tm.Tables[metricsTableName]))
+	tagsTmplTable := template.NewTemplateTable(tm.Schema, tagsTableName, colMapToSlice(tm.Tables[tagsTableName]))
 
 	/* https://github.com/jackc/pgx/issues/872
 	stmts := make([]string, len(tmpls))
@@ -224,7 +225,7 @@ func (tm *TableManager) executeTemplates(
 		if col.Role != utils.TagColType {
 			continue
 		}
-		if _, err := tx.Exec(ctx, "COMMENT ON COLUMN "+tmplTable.String()+"."+QuoteIdentifier(col.Name)+" IS 'tag'"); err != nil {
+		if _, err := tx.Exec(ctx, "COMMENT ON COLUMN "+tmplTable.String()+"."+template.QuoteIdentifier(col.Name)+" IS 'tag'"); err != nil {
 			_ = tx.Rollback(ctx)
 			return fmt.Errorf("setting column role comment: %s", err)
 		}
