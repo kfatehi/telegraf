@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	refreshTableStructureStatement = "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = $1 and table_name = $2"
+	refreshTableStructureStatement = "SELECT column_name, data_type, col_description((table_schema||'.'||table_name)::regclass::oid, ordinal_position) FROM information_schema.columns WHERE table_schema = $1 and table_name = $2"
 )
 
 type TableManager struct {
@@ -47,14 +47,36 @@ func (tm *TableManager) refreshTableStructure(ctx context.Context, tableName str
 	cols := make(map[string]utils.Column)
 	for rows.Next() {
 		var colName, colTypeStr string
-		err := rows.Scan(&colName, &colTypeStr)
+		desc := new(string)
+		err := rows.Scan(&colName, &colTypeStr, &desc)
 		if err != nil {
 			return err
 		}
+
+		role := utils.FieldColType
+		switch colName {
+		case TimeColumnName:
+			role = utils.TimeColType
+		case TagIDColumnName:
+			role = utils.TagsIDColType
+		case TagsJSONColumnName:
+			role = utils.TagColType
+		case FieldsJSONColumnName:
+			role = utils.FieldColType
+		default:
+			// We don't want to monopolize the column comment (preventing user from storing other information there), so just look at the first word
+			if desc != nil {
+				descWords := strings.Split(*desc, " ")
+				if descWords[0] == "tag" {
+					role = utils.TagColType
+				}
+			}
+		}
+
 		cols[colName] = utils.Column{
 			Name: colName,
 			Type: utils.PgDataType(colTypeStr),
-			Role: utils.FieldColType, //FIXME this isn't necessarily correct. could be some other role. But while it's a lie, I don't think it affect anything.
+			Role: role,
 		}
 	}
 
@@ -190,7 +212,21 @@ func (tm *TableManager) executeTemplates(
 		}
 		if _, err := tx.Exec(ctx, string(sql)); err != nil {
 			_ = tx.Rollback(ctx)
-			return fmt.Errorf("executing `%.40s`: %w", sql, err)
+			return fmt.Errorf("executing `%s`: %w", sql, err)
+		}
+	}
+
+	// We need to be able to determine the role of the column when reading the structure back (because of the templates).
+	// For some columns we can determine this by the column name (time, tag_id, etc). However tags and fields can have any
+	// name, and look the same. So we add a comment to tag columns, and through process of elimination what remains are
+	// field columns.
+	for _, col := range newColumns {
+		if col.Role != utils.TagColType {
+			continue
+		}
+		if _, err := tx.Exec(ctx, "COMMENT ON COLUMN "+tmplTable.String()+"."+QuoteIdentifier(col.Name)+" IS 'tag'"); err != nil {
+			_ = tx.Rollback(ctx)
+			return fmt.Errorf("setting column role comment: %s", err)
 		}
 	}
 
