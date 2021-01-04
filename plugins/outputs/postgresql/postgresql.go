@@ -38,7 +38,7 @@ type Postgresql struct {
 	db              *pgxpool.Pool
 	tableManager    *TableManager
 
-	writeChan chan *RowSource
+	writeChan chan *TableSource
 }
 
 func init() {
@@ -75,7 +75,7 @@ func (p *Postgresql) Connect() error {
 
 	maxConns := int(p.db.Stat().MaxConns())
 	if maxConns > 1 {
-		p.writeChan = make(chan *RowSource)
+		p.writeChan = make(chan *TableSource)
 		for i := 0; i < maxConns; i++ {
 			go p.writeWorker(p.dbContext)
 		}
@@ -161,18 +161,27 @@ func (p *Postgresql) SampleConfig() string { return sampleConfig }
 func (p *Postgresql) Description() string  { return "Send metrics to PostgreSQL" }
 
 func (p *Postgresql) Write(metrics []telegraf.Metric) error {
-	rowSources := p.splitRowSources(metrics)
+	tableSources := map[string]*TableSource{}
+
+	for _, m := range metrics {
+		rs := tableSources[m.Name()]
+		if rs == nil {
+			rs = NewTableSource(p)
+			tableSources[m.Name()] = rs
+		}
+		rs.AddMetric(m)
+	}
 
 	if p.db.Stat().MaxConns() > 1 {
-		return p.writeConcurrent(rowSources)
+		return p.writeConcurrent(tableSources)
 	} else {
-		return p.writeSequential(rowSources)
+		return p.writeSequential(tableSources)
 	}
 }
 
-func (p *Postgresql) writeSequential(rowSources map[string]*RowSource) error {
-	for _, rowSource := range rowSources {
-		err := p.writeMetricsFromMeasure(p.dbContext, rowSource)
+func (p *Postgresql) writeSequential(tableSources map[string]*TableSource) error {
+	for _, tableSource := range tableSources {
+		err := p.writeMetricsFromMeasure(p.dbContext, tableSource)
 		if err != nil {
 			if isTempError(err) {
 				//TODO use a transaction so that we don't end up with a partial write, and end up retrying metrics we've already written
@@ -184,10 +193,10 @@ func (p *Postgresql) writeSequential(rowSources map[string]*RowSource) error {
 	return nil
 }
 
-func (p *Postgresql) writeConcurrent(rowSources map[string]*RowSource) error {
-	for _, rowSource := range rowSources {
+func (p *Postgresql) writeConcurrent(tableSources map[string]*TableSource) error {
+	for _, tableSource := range tableSources {
 		select {
-		case p.writeChan <- rowSource:
+		case p.writeChan <- tableSource:
 		case <-p.dbContext.Done():
 			return nil
 		}
@@ -198,8 +207,8 @@ func (p *Postgresql) writeConcurrent(rowSources map[string]*RowSource) error {
 func (p *Postgresql) writeWorker(ctx context.Context) {
 	for {
 		select {
-		case rowSource := <-p.writeChan:
-			if err := p.writeRetry(ctx, rowSource); err != nil {
+		case tableSource := <-p.writeChan:
+			if err := p.writeRetry(ctx, tableSource); err != nil {
 				log.Printf("write error (permanent, dropping sub-batch): %v", err)
 			}
 		case <-p.dbContext.Done():
@@ -216,10 +225,10 @@ func isTempError(err error) bool {
 	return true
 }
 
-func (p *Postgresql) writeRetry(ctx context.Context, rowSource *RowSource) error {
+func (p *Postgresql) writeRetry(ctx context.Context, tableSource *TableSource) error {
 	backoff := time.Duration(0)
 	for {
-		err := p.writeMetricsFromMeasure(ctx, rowSource)
+		err := p.writeMetricsFromMeasure(ctx, tableSource)
 		if err == nil {
 			return nil
 		}
@@ -228,7 +237,7 @@ func (p *Postgresql) writeRetry(ctx context.Context, rowSource *RowSource) error
 			return err
 		}
 		log.Printf("write error (retry in %s): %v", backoff, err)
-		rowSource.Reset()
+		tableSource.Reset()
 		time.Sleep(backoff)
 
 		if backoff == 0 {
@@ -243,27 +252,27 @@ func (p *Postgresql) writeRetry(ctx context.Context, rowSource *RowSource) error
 }
 
 // Writes the metrics from a specified measure. All the provided metrics must belong to the same measurement.
-func (p *Postgresql) writeMetricsFromMeasure(ctx context.Context, rowSource *RowSource) error {
-	err := p.tableManager.MatchSource(ctx, rowSource)
+func (p *Postgresql) writeMetricsFromMeasure(ctx context.Context, tableSource *TableSource) error {
+	err := p.tableManager.MatchSource(ctx, tableSource)
 	if err != nil {
 		return err
 	}
 
 	if p.TagsAsForeignkeys {
-		if err := p.WriteTagTable(ctx, rowSource); err != nil {
+		if err := p.WriteTagTable(ctx, tableSource); err != nil {
 			// log and continue. As the admin can correct the issue, and tags don't change over time, they can be added from
 			// future metrics after issue is corrected.
-			log.Printf("[outputs.postgresql] Error: Writing to tag table '%s': %s", rowSource.Name()+p.TagTableSuffix, err)
+			log.Printf("[outputs.postgresql] Error: Writing to tag table '%s': %s", tableSource.Name()+p.TagTableSuffix, err)
 		}
 	}
 
-	fullTableName := utils.FullTableName(p.Schema, rowSource.Name())
-	_, err = p.db.CopyFrom(ctx, fullTableName, rowSource.ColumnNames(), rowSource)
+	fullTableName := utils.FullTableName(p.Schema, tableSource.Name())
+	_, err = p.db.CopyFrom(ctx, fullTableName, tableSource.ColumnNames(), tableSource)
 	return err
 }
 
-func (p *Postgresql) WriteTagTable(ctx context.Context, rowSource *RowSource) error {
-	tagCols := rowSource.TagTableColumns()
+func (p *Postgresql) WriteTagTable(ctx context.Context, tableSource *TableSource) error {
+	tagCols := tableSource.TagTableColumns()
 
 	columnNames := make([]string, len(tagCols))
 	placeholders := make([]string, len(tagCols))
@@ -274,22 +283,22 @@ func (p *Postgresql) WriteTagTable(ctx context.Context, rowSource *RowSource) er
 
 	// pgx batch code will automatically convert this into a prepared statement & cache it
 	sql := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s) ON CONFLICT (tag_id) DO NOTHING",
-		template.QuoteIdentifier(p.Schema)+"."+template.QuoteIdentifier(rowSource.Name()+p.TagTableSuffix),
+		template.QuoteIdentifier(p.Schema)+"."+template.QuoteIdentifier(tableSource.Name()+p.TagTableSuffix),
 		strings.Join(columnNames, ","),
 		strings.Join(placeholders, ","),
 	)
 
 	batch := &pgx.Batch{}
-	//TODO rowSource should emit another source for the tags. We shouldn't have to dive into its private methods.
+	//TODO tableSource should emit another source for the tags. We shouldn't have to dive into its private methods.
 	//TODO cache which tagSets we've already inserted and skip them.
 	//TODO copy into a temp table, and then `insert ... on conflict` from that into the tag table.
-	for tagID, tagSet := range rowSource.tagSets {
+	for tagID, tagSet := range tableSource.tagSets {
 		values := make([]interface{}, len(columnNames))
 		values[0] = tagID
 
 		if !p.TagsAsJsonb {
 			for _, tag := range tagSet {
-				values[rowSource.tagPositions[tag.Key]+1] = tag.Value // +1 to account for tag_id column
+				values[tableSource.tagPositions[tag.Key]+1] = tag.Value // +1 to account for tag_id column
 			}
 		} else {
 			values[1] = utils.TagListToJSON(tagSet)
@@ -300,7 +309,7 @@ func (p *Postgresql) WriteTagTable(ctx context.Context, rowSource *RowSource) er
 	results := p.db.SendBatch(ctx, batch)
 	defer results.Close()
 
-	for i := 0; i < len(rowSource.tagSets); i++ {
+	for i := 0; i < len(tableSource.tagSets); i++ {
 		if _, err := results.Exec(); err != nil {
 			return err
 		}

@@ -253,7 +253,7 @@ func colMapToSlice(colMap map[string]utils.Column) []utils.Column {
 // If the schema does not match, and schema updates are disabled:
 //   If a field missing from the DB, the field is omitted.
 //   If a tag is missing from the DB, the metric is dropped.
-func (tm *TableManager) MatchSource(ctx context.Context, rowSource *RowSource) error {
+func (tm *TableManager) MatchSource(ctx context.Context, rowSource *TableSource) error {
 	metricTableName := rowSource.Name()
 	var tagTableName string
 	if tm.TagsAsForeignkeys {
