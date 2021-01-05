@@ -120,6 +120,13 @@ var sampleConfig = `
   ## e.g. PGPASSWORD, PGHOST, PGUSER, PGDATABASE 
   ## all supported vars here: https://www.postgresql.org/docs/current/libpq-envars.html
   ##
+  ## Non-standard parameters:
+  ##   pool_max_conns (default: 1) - Maximum size of connection pool for parallel (per-batch per-table) inserts.
+  ##   pool_min_conns (default: 0) - Minimum size of connection pool.
+  ##   pool_max_conn_lifetime (default: 0s) - Maximum age of a connection before closing.
+  ##   pool_max_conn_idle_time (default: 0s) - Maximum idle time of a connection before closing.
+  ##   pool_health_check_period (default: 0s) - Duration between health checks on idle connections.
+  ##
   ## Without the dbname parameter, the driver will default to a database
   ## with the same name as the user. This dbname is just for instantiating a
   ## connection with the server and doesn't restrict the databases we are trying
@@ -133,18 +140,6 @@ var sampleConfig = `
   ## Store tags as foreign keys in the metrics table. Default is false.
   # tags_as_foreignkeys = false
 
-  ## Template to use for generating tables
-  ## Available Variables:
-  ##   {TABLE} - tablename as identifier
-  ##   {TABLELITERAL} - tablename as string literal
-  ##   {COLUMNS} - column definitions
-  ##   {KEY_COLUMNS} - comma-separated list of key columns (time + tags)
-
-  ## Default template
-  # table_template = "CREATE TABLE IF NOT EXISTS {TABLE}({COLUMNS})"
-  ## Example for timescaledb
-  # table_template = "CREATE TABLE IF NOT EXISTS {TABLE}({COLUMNS}); SELECT create_hypertable({TABLELITERAL},'time',chunk_time_interval := '1 week'::interval,if_not_exists := true);"
-
   ## Schema to create the tables into
   # schema = "public"
 
@@ -154,6 +149,17 @@ var sampleConfig = `
   ## Use jsonb datatype for fields
   # fields_as_jsonb = false
 
+  ## Templated statements to execute when creating a new table.
+  create_templates = ['CREATE TABLE {{.table}} ({{.columns}})']
+
+  ## Templated statements to execute when adding columns to a table.
+  add_column_templates = ['ALTER TABLE {{.table}} ADD COLUMN IF NOT EXISTS {{.columns|join ", ADD COLUMN IF NOT EXISTS "}}']
+
+  ## Templated statements to execute when creating a new tag table.
+  tag_table_create_templates ['CREATE TABLE {{.table}} ({{.columns}}, PRIMARY KEY (tag_id))']
+
+  ## Templated statements to execute when adding columns to a tag table.
+  tag_table_add_column_templates ['ALTER TABLE {{.table}} ADD COLUMN IF NOT EXISTS {{.columns|join ", ADD COLUMN IF NOT EXISTS "}}']
 `
 
 func (p *Postgresql) SampleConfig() string { return sampleConfig }
