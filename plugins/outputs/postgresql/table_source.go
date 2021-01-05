@@ -2,11 +2,11 @@ package postgresql
 
 import (
 	"fmt"
-
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/plugins/outputs/postgresql/utils"
 )
 
+// TableSource satisfies pgx.CopyFromSource
 type TableSource struct {
 	postgresql   *Postgresql
 	metrics      []telegraf.Metric
@@ -293,5 +293,88 @@ func (tsrc *TableSource) Values() ([]interface{}, error) {
 }
 
 func (tsrc *TableSource) Err() error {
+	return nil
+}
+
+type TagTableSource struct {
+	*TableSource
+	tagIDs []int64
+
+	cursor       int
+	cursorValues []interface{}
+	cursorError  error
+}
+
+func NewTagTableSource(tsrc *TableSource) *TagTableSource {
+	ttsrc := &TagTableSource{
+		TableSource: tsrc,
+		cursor:      -1,
+	}
+
+	ttsrc.tagIDs = make([]int64, 0, len(tsrc.tagSets))
+	for tagID := range tsrc.tagSets {
+		ttsrc.tagIDs = append(ttsrc.tagIDs, tagID)
+	}
+
+	return ttsrc
+}
+
+func (ttsrc *TagTableSource) Name() string {
+	return ttsrc.TableSource.Name() + ttsrc.postgresql.TagTableSuffix
+}
+
+func (ttsrc *TagTableSource) ColumnNames() []string {
+	cols := ttsrc.TagTableColumns()
+	names := make([]string, len(cols))
+	for i, col := range cols {
+		names[i] = col.Name
+	}
+	return names
+}
+
+func (ttsrc *TagTableSource) Next() bool {
+	for {
+		if ttsrc.cursor+1 >= len(ttsrc.tagIDs) {
+			ttsrc.cursorValues = nil
+			ttsrc.cursorError = nil
+			return false
+		}
+		ttsrc.cursor += 1
+
+		ttsrc.cursorValues, ttsrc.cursorError = ttsrc.values()
+		if ttsrc.cursorValues != nil || ttsrc.cursorError != nil {
+			return true
+		}
+	}
+}
+
+func (ttsrc *TagTableSource) Reset() {
+	ttsrc.cursor = -1
+}
+
+func (ttsrc *TagTableSource) values() ([]interface{}, error) {
+	tagID := ttsrc.tagIDs[ttsrc.cursor]
+	tagSet := ttsrc.tagSets[tagID]
+
+	var values []interface{}
+	if !ttsrc.postgresql.TagsAsJsonb {
+		values = make([]interface{}, len(tagSet)+1)
+		for _, tag := range tagSet {
+			values[ttsrc.TableSource.tagPositions[tag.Key]+1] = tag.Value // +1 to account for tag_id column
+		}
+	} else {
+		values = make([]interface{}, 2)
+		values[1] = utils.TagListToJSON(tagSet)
+	}
+	values[0] = tagID
+
+	return values, nil
+}
+
+func (ttsrc *TagTableSource) Values() ([]interface{}, error) {
+	return ttsrc.cursorValues, ttsrc.cursorError
+}
+
+func (ttsrc *TagTableSource) Err() error {
 	return nil
 }

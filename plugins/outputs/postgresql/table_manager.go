@@ -205,6 +205,7 @@ func (tm *TableManager) executeTemplates(
 	if err != nil {
 		return err
 	}
+	defer tx.Rollback(ctx)
 
 	for _, tmpl := range tmpls {
 		sql, err := tmpl.Render(tmplTable, newColumns, metricsTmplTable, tagsTmplTable)
@@ -212,7 +213,6 @@ func (tm *TableManager) executeTemplates(
 			return err
 		}
 		if _, err := tx.Exec(ctx, string(sql)); err != nil {
-			_ = tx.Rollback(ctx)
 			return fmt.Errorf("executing `%s`: %w", sql, err)
 		}
 	}
@@ -226,7 +226,6 @@ func (tm *TableManager) executeTemplates(
 			continue
 		}
 		if _, err := tx.Exec(ctx, "COMMENT ON COLUMN "+tmplTable.String()+"."+template.QuoteIdentifier(col.Name)+" IS 'tag'"); err != nil {
-			_ = tx.Rollback(ctx)
 			return fmt.Errorf("setting column role comment: %s", err)
 		}
 	}

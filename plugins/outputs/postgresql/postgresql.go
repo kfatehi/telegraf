@@ -8,7 +8,6 @@ import (
 	"github.com/influxdata/telegraf/plugins/outputs/postgresql/template"
 	"github.com/jackc/pgconn"
 	"log"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v4"
@@ -272,48 +271,29 @@ func (p *Postgresql) writeMetricsFromMeasure(ctx context.Context, tableSource *T
 }
 
 func (p *Postgresql) WriteTagTable(ctx context.Context, tableSource *TableSource) error {
-	tagCols := tableSource.TagTableColumns()
-
-	columnNames := make([]string, len(tagCols))
-	placeholders := make([]string, len(tagCols))
-	for i, col := range tagCols {
-		columnNames[i] = template.QuoteIdentifier(col.Name)
-		placeholders[i] = fmt.Sprintf("$%d", i+1)
-	}
-
-	// pgx batch code will automatically convert this into a prepared statement & cache it
-	sql := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s) ON CONFLICT (tag_id) DO NOTHING",
-		template.QuoteIdentifier(p.Schema)+"."+template.QuoteIdentifier(tableSource.Name()+p.TagTableSuffix),
-		strings.Join(columnNames, ","),
-		strings.Join(placeholders, ","),
-	)
-
-	batch := &pgx.Batch{}
-	//TODO tableSource should emit another source for the tags. We shouldn't have to dive into its private methods.
 	//TODO cache which tagSets we've already inserted and skip them.
-	//TODO copy into a temp table, and then `insert ... on conflict` from that into the tag table.
-	for tagID, tagSet := range tableSource.tagSets {
-		values := make([]interface{}, len(columnNames))
-		values[0] = tagID
+	ttsrc := NewTagTableSource(tableSource)
 
-		if !p.TagsAsJsonb {
-			for _, tag := range tagSet {
-				values[tableSource.tagPositions[tag.Key]+1] = tag.Value // +1 to account for tag_id column
-			}
-		} else {
-			values[1] = utils.TagListToJSON(tagSet)
-		}
-
-		batch.Queue(sql, values...)
+	tx, err := p.db.Begin(ctx)
+	if err != nil {
+		return err
 	}
-	results := p.db.SendBatch(ctx, batch)
-	defer results.Close()
+	defer tx.Rollback(ctx)
 
-	for i := 0; i < len(tableSource.tagSets); i++ {
-		if _, err := results.Exec(); err != nil {
-			return err
-		}
+	ident := pgx.Identifier{ttsrc.postgresql.Schema, ttsrc.Name()}
+	identTemp := pgx.Identifier{ttsrc.Name() + "_temp"}
+	_, err = tx.Exec(ctx, fmt.Sprintf("CREATE TEMP TABLE %s (LIKE %s) ON COMMIT DROP", identTemp.Sanitize(), ident.Sanitize()))
+	if err != nil {
+		return fmt.Errorf("creating tags temp table: %w", err)
 	}
 
-	return nil
+	if _, err := tx.CopyFrom(ctx, identTemp, ttsrc.ColumnNames(), ttsrc); err != nil {
+		return fmt.Errorf("copying into tags temp table: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx, fmt.Sprintf("INSERT INTO %s SELECT * FROM %s ON CONFLICT (tag_id) DO NOTHING", ident.Sanitize(), identTemp.Sanitize())); err != nil {
+		return fmt.Errorf("inserting into tags table: %w", err)
+	}
+
+	return tx.Commit(ctx)
 }
