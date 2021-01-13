@@ -92,6 +92,7 @@ func (tm *TableManager) refreshTableStructure(ctx context.Context, tableName str
 
 func (tm *TableManager) EnsureStructure(
 	ctx context.Context,
+	db dbh,
 	tableName string,
 	columns []utils.Column,
 	createTemplates []*template.Template,
@@ -117,7 +118,7 @@ func (tm *TableManager) EnsureStructure(
 		tm.tablesMutex.RUnlock()
 		if !ok {
 			// Ok, table doesn't exist, now we can create it.
-			if err := tm.executeTemplates(ctx, createTemplates, tableName, columns, metricsTableName, tagsTableName); err != nil {
+			if err := tm.executeTemplates(ctx, db, createTemplates, tableName, columns, metricsTableName, tagsTableName); err != nil {
 				return nil, fmt.Errorf("creating table: %w", err)
 			}
 			tm.tablesMutex.RLock()
@@ -138,7 +139,7 @@ func (tm *TableManager) EnsureStructure(
 		return missingColumns, nil
 	}
 
-	if err := tm.executeTemplates(ctx, addColumnsTemplates, tableName, missingColumns, metricsTableName, tagsTableName); err != nil {
+	if err := tm.executeTemplates(ctx, db, addColumnsTemplates, tableName, missingColumns, metricsTableName, tagsTableName); err != nil {
 		return nil, fmt.Errorf("adding columns: %w", err)
 	}
 	return tm.checkColumns(tm.Tables[tableName], columns)
@@ -161,6 +162,7 @@ func (tm *TableManager) checkColumns(dbColumns map[string]utils.Column, srcColum
 
 func (tm *TableManager) executeTemplates(
 	ctx context.Context,
+	db dbh,
 	tmpls []*template.Template,
 	tableName string,
 	newColumns []utils.Column,
@@ -201,7 +203,7 @@ func (tm *TableManager) executeTemplates(
 	tm.refreshTableStructureResponse(tableName, rows)
 	*/
 
-	tx, err := tm.db.Begin(ctx)
+	tx, err := db.Begin(ctx)
 	if err != nil {
 		return err
 	}
@@ -252,7 +254,7 @@ func colMapToSlice(colMap map[string]utils.Column) []utils.Column {
 // If the schema does not match, and schema updates are disabled:
 //   If a field missing from the DB, the field is omitted.
 //   If a tag is missing from the DB, the metric is dropped.
-func (tm *TableManager) MatchSource(ctx context.Context, rowSource *TableSource) error {
+func (tm *TableManager) MatchSource(ctx context.Context, db dbh, rowSource *TableSource) error {
 	metricTableName := rowSource.Name()
 	var tagTableName string
 	if tm.TagsAsForeignkeys {
@@ -260,6 +262,7 @@ func (tm *TableManager) MatchSource(ctx context.Context, rowSource *TableSource)
 
 		missingCols, err := tm.EnsureStructure(
 			ctx,
+			db,
 			tagTableName,
 			rowSource.TagTableColumns(),
 			tm.TagTableCreateTemplates,
@@ -281,7 +284,9 @@ func (tm *TableManager) MatchSource(ctx context.Context, rowSource *TableSource)
 		}
 	}
 
-	missingCols, err := tm.EnsureStructure(ctx,
+	missingCols, err := tm.EnsureStructure(
+		ctx,
+		db,
 		metricTableName,
 		rowSource.MetricTableColumns(),
 		tm.CreateTemplates,

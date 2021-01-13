@@ -18,6 +18,13 @@ import (
 	"github.com/influxdata/telegraf/plugins/outputs/postgresql/utils"
 )
 
+type dbh interface {
+	Begin(ctx context.Context) (pgx.Tx, error)
+	CopyFrom(ctx context.Context, tableName pgx.Identifier, columnNames []string, rowSrc pgx.CopyFromSource) (int64, error)
+	Exec(ctx context.Context, sql string, arguments ...interface{}) (commandTag pgconn.CommandTag, err error)
+	Query(ctx context.Context, sql string, args ...interface{}) (pgx.Rows, error)
+}
+
 type Postgresql struct {
 	Connection                 string
 	Schema                     string
@@ -185,15 +192,24 @@ func (p *Postgresql) Write(metrics []telegraf.Metric) error {
 }
 
 func (p *Postgresql) writeSequential(tableSources map[string]*TableSource) error {
+	tx, err := p.db.Begin(p.dbContext)
+	if err != nil {
+		return fmt.Errorf("starting transaction: %w", err)
+	}
+	defer tx.Rollback(p.dbContext)
+
 	for _, tableSource := range tableSources {
-		err := p.writeMetricsFromMeasure(p.dbContext, tableSource)
+		err := p.writeMetricsFromMeasure(p.dbContext, tx, tableSource)
 		if err != nil {
 			if isTempError(err) {
-				//TODO use a transaction so that we don't end up with a partial write, and end up retrying metrics we've already written
 				return err
 			}
 			log.Printf("write error (permanent, dropping sub-batch): %v", err)
 		}
+	}
+
+	if err := tx.Commit(p.dbContext); err != nil {
+		return fmt.Errorf("committing transaction: %w", err)
 	}
 	return nil
 }
@@ -233,7 +249,7 @@ func isTempError(err error) bool {
 func (p *Postgresql) writeRetry(ctx context.Context, tableSource *TableSource) error {
 	backoff := time.Duration(0)
 	for {
-		err := p.writeMetricsFromMeasure(ctx, tableSource)
+		err := p.writeMetricsFromMeasure(ctx, p.db, tableSource)
 		if err == nil {
 			return nil
 		}
@@ -257,14 +273,14 @@ func (p *Postgresql) writeRetry(ctx context.Context, tableSource *TableSource) e
 }
 
 // Writes the metrics from a specified measure. All the provided metrics must belong to the same measurement.
-func (p *Postgresql) writeMetricsFromMeasure(ctx context.Context, tableSource *TableSource) error {
-	err := p.tableManager.MatchSource(ctx, tableSource)
+func (p *Postgresql) writeMetricsFromMeasure(ctx context.Context, db dbh, tableSource *TableSource) error {
+	err := p.tableManager.MatchSource(ctx, db, tableSource)
 	if err != nil {
 		return err
 	}
 
 	if p.TagsAsForeignkeys {
-		if err := p.WriteTagTable(ctx, tableSource); err != nil {
+		if err := p.WriteTagTable(ctx, db, tableSource); err != nil {
 			// log and continue. As the admin can correct the issue, and tags don't change over time, they can be added from
 			// future metrics after issue is corrected.
 			log.Printf("[outputs.postgresql] Error: Writing to tag table '%s': %s", tableSource.Name()+p.TagTableSuffix, err)
@@ -272,15 +288,15 @@ func (p *Postgresql) writeMetricsFromMeasure(ctx context.Context, tableSource *T
 	}
 
 	fullTableName := utils.FullTableName(p.Schema, tableSource.Name())
-	_, err = p.db.CopyFrom(ctx, fullTableName, tableSource.ColumnNames(), tableSource)
+	_, err = db.CopyFrom(ctx, fullTableName, tableSource.ColumnNames(), tableSource)
 	return err
 }
 
-func (p *Postgresql) WriteTagTable(ctx context.Context, tableSource *TableSource) error {
+func (p *Postgresql) WriteTagTable(ctx context.Context, db dbh, tableSource *TableSource) error {
 	//TODO cache which tagSets we've already inserted and skip them.
 	ttsrc := NewTagTableSource(tableSource)
 
-	tx, err := p.db.Begin(ctx)
+	tx, err := db.Begin(ctx)
 	if err != nil {
 		return err
 	}
