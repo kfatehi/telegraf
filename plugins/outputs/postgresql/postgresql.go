@@ -141,9 +141,6 @@ var sampleConfig = `
   ##
   connection = "host=localhost user=postgres sslmode=verify-full"
 
-  ## Update existing tables to match the incoming metrics automatically. Default is true
-  # do_schema_updates = true
-
   ## Store tags as foreign keys in the metrics table. Default is false.
   # tags_as_foreignkeys = false
 
@@ -160,13 +157,15 @@ var sampleConfig = `
   create_templates = ['CREATE TABLE {{.table}} ({{.columns}})']
 
   ## Templated statements to execute when adding columns to a table.
+  ## Set to an empty list to disable. When doing so, points will be inserted with the missing fields/columns omitted.
   add_column_templates = ['ALTER TABLE {{.table}} ADD COLUMN IF NOT EXISTS {{.columns|join ", ADD COLUMN IF NOT EXISTS "}}']
 
   ## Templated statements to execute when creating a new tag table.
-  tag_table_create_templates ['CREATE TABLE {{.table}} ({{.columns}}, PRIMARY KEY (tag_id))']
+  tag_table_create_templates = ['CREATE TABLE {{.table}} ({{.columns}}, PRIMARY KEY (tag_id))']
 
   ## Templated statements to execute when adding columns to a tag table.
-  tag_table_add_column_templates ['ALTER TABLE {{.table}} ADD COLUMN IF NOT EXISTS {{.columns|join ", ADD COLUMN IF NOT EXISTS "}}']
+  ## Set to an empty list to disable. When doing so, points containing the missing tags will be omitted.
+  tag_table_add_column_templates = ['ALTER TABLE {{.table}} ADD COLUMN IF NOT EXISTS {{.columns|join ", ADD COLUMN IF NOT EXISTS "}}']
 `
 
 func (p *Postgresql) SampleConfig() string { return sampleConfig }
@@ -243,6 +242,9 @@ func isTempError(err error) bool {
 	if errors.As(err, &pgErr); pgErr != nil {
 		return false
 	}
+	//TODO review:
+	// https://godoc.org/github.com/jackc/pgerrcode
+	// https://www.postgresql.org/docs/10/errcodes-appendix.html
 	return true
 }
 
