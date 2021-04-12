@@ -1,3 +1,113 @@
+/*
+
+Templates are used for creation of the SQL used when creating and modifying tables. These templates are specified within
+the configuration as the parameters 'create_templates', 'add_column_templates, 'tag_table_create_templates', and
+'tag_table_add_column_templates'.
+
+The templating functionality behaves the same in all cases. However the variables will differ.
+
+
+Variables
+
+The following variables are available within all template executions:
+
+ * table - A TemplateTable object referring to the current table being
+   created/modified.
+
+ * columns - A TemplateColumns object of the new columns being added to the
+   table (all columns in the case of a new table, and new columns in the case
+   of existing table).
+
+ * allColumns - A TemplateColumns object of all the columns (both old and new)
+   of the table. In the case of a new table, this is the same as `columns`.
+
+ * metricTable - A TemplateTable object referring to the table containing the
+   fields. In the case of TagsAsForeignKeys and `table` is the tag table, then
+   `metricTable` is the table using this one for its tags.
+
+ * tagTable - A TemplateTable object referring to the table containing the
+   tags. In the case of TagsAsForeignKeys and `table` is the metrics table,
+   then `tagTable` is the table containing the tags for this one.
+
+Each object has helper methods that may be used within the template. See the documentation for the appropriate type.
+
+When the object is interpolated without a helper, it is automatically converted to a string through its String() method.
+
+
+Functions
+
+All the functions provided by the Sprig library (http://masterminds.github.io/sprig/) are available within template executions.
+
+In addition, the following functions are also available:
+
+  * quoteIdentifier - Quotes the input string as a Postgres identifier.
+
+  * quoteLiteral - Quotes the input string as a Postgres literal.
+
+
+Examples
+
+The default templates show basic usage. When left unconfigured, it is the equivalent of:
+ [outputs.postgresql]
+   create_templates = [
+     '''CREATE TABLE {{.table}} ({{.columns}})''',
+   ]
+   add_column_templates = [
+     '''ALTER TABLE {{.table}} ADD COLUMN IF NOT EXISTS {{.columns|join ", ADD COLUMN IF NOT EXISTS "}}''',
+   ]
+   tag_table_create_templates = [
+     '''CREATE TABLE {{.table}} ({{.columns}}, PRIMARY KEY (tag_id))'''
+   ]
+   tag_table_add_column_templates = [
+     '''ALTER TABLE {{.table}} ADD COLUMN IF NOT EXISTS {{.columns|join ", ADD COLUMN IF NOT EXISTS "}}''',
+   ]
+
+A simple example for usage with TimescaleDB would be:
+ [outputs.postgresql]
+   create_templates = [
+     '''CREATE TABLE {{ .table }} ({{ .allColumns }})''',
+     '''SELECT create_hypertable({{ .table|quoteLiteral }}, 'time', chunk_time_interval => INTERVAL '1d')''',
+     '''ALTER TABLE {{ .table }} SET (timescaledb.compress, timescaledb.compress_segmentby = 'tag_id')''',
+     '''SELECT add_compression_policy({{ .table|quoteLiteral }}, INTERVAL '2h')''',
+   ]
+...where the defaults for the other templates would be automatically applied.
+
+A very complex example for versions of TimescaleDB which don't support adding columns to compressed hypertables (v<2.1.0), using views and unions to emulate the functionality, would be:
+ [outputs.postgresql]
+   schema = "telegraf"
+   create_templates = [
+     '''CREATE TABLE {{ .table }} ({{ .allColumns }})''',
+     '''SELECT create_hypertable({{ .table|quoteLiteral }}, 'time', chunk_time_interval => INTERVAL '1d')''',
+     '''ALTER TABLE {{ .table }} SET (timescaledb.compress, timescaledb.compress_segmentby = 'tag_id')''',
+     '''SELECT add_compression_policy({{ .table|quoteLiteral }}, INTERVAL '2d')''',
+     '''CREATE VIEW {{ .table.WithSuffix "_data" }} AS
+          SELECT {{ .allColumns.Selectors | join "," }} FROM {{ .table }}''',
+     '''CREATE VIEW {{ .table.WithSchema "public" }} AS
+          SELECT time, {{ (.tagTable.Columns.Tags.Concat .allColumns.Fields).Identifiers | join "," }}
+          FROM {{ .table.WithSuffix "_data" }} t, {{ .tagTable }} tt
+          WHERE t.tag_id = tt.tag_id''',
+   ]
+   add_column_templates = [
+     '''ALTER TABLE {{ .table }} RENAME TO {{ (.table.WithSuffix "_" .table.Columns.Hash).WithSchema "" }}''',
+     '''ALTER VIEW {{ .table.WithSuffix "_data" }} RENAME TO {{ (.table.WithSuffix "_" .table.Columns.Hash "_data").WithSchema "" }}''',
+     '''DROP VIEW {{ .table.WithSchema "public" }}''',
+
+     '''CREATE TABLE {{ .table }} ({{ .allColumns }})''',
+     '''SELECT create_hypertable({{ .table|quoteLiteral }}, 'time', chunk_time_interval => INTERVAL '1d')''',
+     '''ALTER TABLE {{ .table }} SET (timescaledb.compress, timescaledb.compress_segmentby = 'tag_id')''',
+     '''SELECT add_compression_policy({{ .table|quoteLiteral }}, INTERVAL '2d')''',
+     '''CREATE VIEW {{ .table.WithSuffix "_data" }} AS
+          SELECT {{ .allColumns.Selectors | join "," }}
+          FROM {{ .table }}
+          UNION ALL
+          SELECT {{ (.allColumns.Union .table.Columns).Selectors | join "," }}
+          FROM {{ .table.WithSuffix "_" .table.Columns.Hash "_data" }}''',
+     '''CREATE VIEW {{ .table.WithSchema "public" }}
+          AS SELECT time, {{ (.tagTable.Columns.Tags.Concat .allColumns.Fields).Identifiers | join "," }}
+          FROM {{ .table.WithSuffix "_data" }} t, {{ .tagTable }} tt
+          WHERE t.tag_id = tt.tag_id''',
+   ]
+*/
 package template
 
 import (
@@ -14,9 +124,12 @@ import (
 	"github.com/Masterminds/sprig"
 )
 
+// TableCreateTemplate is the default template used for creating new tables.
 var TableCreateTemplate = newTemplate(`CREATE TABLE {{.table}} ({{.columns}})`)
-var TableAddColumnTemplate = newTemplate(`ALTER TABLE {{.table}} ADD COLUMN IF NOT EXISTS {{.columns|join ", ADD COLUMN IF NOT EXISTS "}}`)
+// TagTableCreateTemplate is the default template used when creating a new tag table.
 var TagTableCreateTemplate = newTemplate(`CREATE TABLE {{.table}} ({{.columns}}, PRIMARY KEY (tag_id))`)
+// TableAddColumnTemplate is the default template used when adding new columns to an existing table.
+var TableAddColumnTemplate = newTemplate(`ALTER TABLE {{.table}} ADD COLUMN IF NOT EXISTS {{.columns|join ", ADD COLUMN IF NOT EXISTS "}}`)
 
 var templateFuncs = map[string]interface{}{
 	"quoteIdentifier": QuoteIdentifier,
@@ -35,13 +148,20 @@ func asString(obj interface{}) string {
 		return fmt.Sprintf("%v", obj)
 	}
 }
+// QuoteIdentifier quotes the given string as a Postgres identifier (double-quotes the value).
+//
+// QuoteIdentifier is accessible within templates as 'quoteIdentifier'.
 func QuoteIdentifier(name interface{}) string {
 	return `"` + strings.ReplaceAll(asString(name), `"`, `""`) + `"`
 }
+// QuoteLiteral quotes the given string as a Postgres literal (single-quotes the value).
+//
+// QuoteLiteral is accessible within templates as 'quoteLiteral'.
 func QuoteLiteral(str interface{}) string {
 	return "'" + strings.ReplaceAll(asString(str), "'", "''") + "'"
 }
 
+// TemplateTable is an object which represents a Postgres table.
 type TemplateTable struct {
 	Schema  string
 	Name    string
@@ -59,33 +179,38 @@ func NewTemplateTable(schemaName, tableName string, columns []utils.Column) *Tem
 	}
 }
 
-//func (tt *TemplateTable) SetName(name string) {
-//	tt.Name = name
-//}
-//func (tt *TemplateTable) SetSchema(schema string) {
-//	tt.Schema = schema
-//}
+// String returns the table's fully qualified & quoted identifier (schema+table).
 func (tt *TemplateTable) String() string {
 	return tt.Identifier()
 }
+
+// Identifier returns the table's fully qualified & quoted identifier (schema+table).
+//
+// If schema is empty, it is omitted from the result.
 func (tt *TemplateTable) Identifier() string {
 	if tt.Schema == "" {
 		return QuoteIdentifier(tt.Name)
 	}
 	return QuoteIdentifier(tt.Schema) + "." + QuoteIdentifier(tt.Name)
 }
+
+// WithSchema returns a copy of the TemplateTable object, but with the schema replaced by the given value.
 func (tt *TemplateTable) WithSchema(name string) *TemplateTable {
 	ttNew := &TemplateTable{}
 	*ttNew = *tt
 	ttNew.Schema = name
 	return ttNew
 }
+
+// WithName returns a copy of the TemplateTable object, but with the name replaced by the given value.
 func (tt *TemplateTable) WithName(name string) *TemplateTable {
 	ttNew := &TemplateTable{}
 	*ttNew = *tt
 	ttNew.Name = name
 	return ttNew
 }
+
+// WithSuffix returns a copy of the TemplateTable object, but with the name suffixed with the given value.
 func (tt *TemplateTable) WithSuffix(suffixes ...string) *TemplateTable {
 	ttNew := &TemplateTable{}
 	*ttNew = *tt
@@ -93,38 +218,46 @@ func (tt *TemplateTable) WithSuffix(suffixes ...string) *TemplateTable {
 	return ttNew
 }
 
-//func (tt *TemplateTable) Literal() string {
-//	return QuoteLiteral(tt.Identifier())
-//}
-
+// A TemplateColumn is an object which represents a Postgres column.
 type TemplateColumn utils.Column
 
+// String returns the column's definition (as used in a CREATE TABLE statement). E.G:
+//  "my_column" bigint
 func (tc TemplateColumn) String() string {
 	return tc.Definition()
 }
+
+// Definition returns the column's definition (as used in a CREATE TABLE statement). E.G:
+//  "my_column" bigint
 func (tc TemplateColumn) Definition() string {
 	return tc.Identifier() + " " + string(tc.Type)
 }
+
+// Identifier returns the column's quoted identifier.
 func (tc TemplateColumn) Identifier() string {
 	return QuoteIdentifier(tc.Name)
 }
+
+// Selector returns the selector for the column. For most cases this is the same as Identifier. However in some cases, such as a UNION, this may return a statement such as `NULL AS "foo"`.
 func (tc TemplateColumn) Selector() string {
 	if tc.Type != "" {
 		return tc.Identifier()
 	}
-	return "NULL as " + tc.Identifier()
+	return "NULL AS " + tc.Identifier()
 }
+
+// IsTag returns true if the column is a tag column. Otherwise false.
 func (tc TemplateColumn) IsTag() bool {
 	return tc.Role == utils.TagColType
 }
+
+// IsField returns true if the column is a field column. Otherwise false.
 func (tc TemplateColumn) IsField() bool {
 	return tc.Role == utils.FieldColType
 }
 
-//func (tc TemplateColumn) Literal() string {
-//	return QuoteLiteral(tc.Name)
-//}
-
+// TemplateColumns represents an ordered list of TemplateColumn objects, with convenience methods for operating on the
+// list.
 type TemplateColumns []TemplateColumn
 
 func NewTemplateColumns(cols []utils.Column) TemplateColumns {
@@ -135,10 +268,12 @@ func NewTemplateColumns(cols []utils.Column) TemplateColumns {
 	return tcs
 }
 
+// List returns the TemplateColumns object as a slice of TemplateColumn.
 func (tcs TemplateColumns) List() []TemplateColumn {
 	return tcs
 }
 
+// Definitions returns the list of column definitions.
 func (tcs TemplateColumns) Definitions() []string {
 	defs := make([]string, len(tcs))
 	for i, tc := range tcs {
@@ -147,6 +282,7 @@ func (tcs TemplateColumns) Definitions() []string {
 	return defs
 }
 
+// Identifiers returns the list of quoted column identifiers.
 func (tcs TemplateColumns) Identifiers() []string {
 	idents := make([]string, len(tcs))
 	for i, tc := range tcs {
@@ -155,6 +291,7 @@ func (tcs TemplateColumns) Identifiers() []string {
 	return idents
 }
 
+// Selectors returns the list of column selectors.
 func (tcs TemplateColumns) Selectors() []string {
 	selectors := make([]string, len(tcs))
 	for i, tc := range tcs {
@@ -163,6 +300,7 @@ func (tcs TemplateColumns) Selectors() []string {
 	return selectors
 }
 
+// String returns the comma delimited list of column identifiers.
 func (tcs TemplateColumns) String() string {
 	colStrs := make([]string, len(tcs))
 	for i, tc := range tcs {
@@ -171,6 +309,7 @@ func (tcs TemplateColumns) String() string {
 	return strings.Join(colStrs, ", ")
 }
 
+// Keys returns a TemplateColumns list of the columns which are not fields (e.g. time, tag_id, & tags).
 func (tcs TemplateColumns) Keys() TemplateColumns {
 	var cols []TemplateColumn
 	for _, tc := range tcs {
@@ -181,12 +320,17 @@ func (tcs TemplateColumns) Keys() TemplateColumns {
 	return cols
 }
 
+// Sorted returns a sorted copy of TemplateColumns.
+//
+// Columns are sorted so that they are in order as: [Time, Tags, Fields], with the columns within each group sorted
+// alphabetically.
 func (tcs TemplateColumns) Sorted() TemplateColumns {
 	cols := append([]TemplateColumn{}, tcs...)
 	(*utils.ColumnList)(unsafe.Pointer(&cols)).Sort()
 	return cols
 }
 
+// Concat returns a copy of TemplateColumns with the given tcsList appended to the end.
 func (tcs TemplateColumns) Concat(tcsList ...TemplateColumns) TemplateColumns {
 	tcsNew := append(TemplateColumns{}, tcs...)
 	for _, tcs := range tcsList {
@@ -195,7 +339,8 @@ func (tcs TemplateColumns) Concat(tcsList ...TemplateColumns) TemplateColumns {
 	return tcsNew
 }
 
-// Generates a list of SQL selectors against the given columns.
+// Union generates a list of SQL selectors against the given columns.
+//
 // For each column in tcs, if the column also exist in tcsFrom, it will be selected. If the column does not exist NULL will be selected.
 func (tcs TemplateColumns) Union(tcsFrom TemplateColumns) TemplateColumns {
 	tcsNew := append(TemplateColumns{}, tcs...)
@@ -211,6 +356,7 @@ TCS:
 	return tcsNew
 }
 
+// Tags returns a TemplateColumns list of the columns which are tags.
 func (tcs TemplateColumns) Tags() TemplateColumns {
 	var cols []TemplateColumn
 	for _, tc := range tcs {
@@ -221,6 +367,7 @@ func (tcs TemplateColumns) Tags() TemplateColumns {
 	return cols
 }
 
+// Fields returns a TemplateColumns list of the columns which are fields.
 func (tcs TemplateColumns) Fields() TemplateColumns {
 	var cols []TemplateColumn
 	for _, tc := range tcs {
@@ -231,6 +378,9 @@ func (tcs TemplateColumns) Fields() TemplateColumns {
 	return cols
 }
 
+// Hash returns a hash of the column names. The hash is base-32 encoded string, up to 7 characters long with no padding.
+//
+// This can be useful as an identifier for supporting table renaming + unions in the case of non-modifiable tables.
 func (tcs TemplateColumns) Hash() string {
 	hash := fnv.New32a()
 	for _, tc := range tcs.Sorted() {
