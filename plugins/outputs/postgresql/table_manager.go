@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"github.com/influxdata/telegraf/plugins/outputs/postgresql/template"
-	"log"
 	"strings"
 	"sync"
 
@@ -12,12 +11,17 @@ import (
 )
 
 const (
-	refreshTableStructureStatement = "SELECT column_name, data_type, col_description((table_schema||'.'||table_name)::regclass::oid, ordinal_position) FROM information_schema.columns WHERE table_schema = $1 and table_name = $2"
+	refreshTableStructureStatement = `
+		SELECT column_name, data_type, col_description(format('%I.%I', table_schema, table_name)::regclass::oid, ordinal_position)
+		FROM information_schema.columns
+		WHERE table_schema = $1 and table_name = $2
+	`
 )
 
 type TableManager struct {
 	*Postgresql
 
+	// map[tableName]map[columnName]utils.Column
 	Tables      map[string]map[string]utils.Column
 	tablesMutex sync.RWMutex
 }
@@ -38,8 +42,8 @@ func (tm *TableManager) ClearTableCache() {
 	tm.tablesMutex.Unlock()
 }
 
-func (tm *TableManager) refreshTableStructure(ctx context.Context, tableName string) error {
-	rows, err := tm.db.Query(ctx, refreshTableStructureStatement, tm.Schema, tableName)
+func (tm *TableManager) refreshTableStructure(ctx context.Context, db dbh, tableName string) error {
+	rows, err := db.Query(ctx, refreshTableStructureStatement, tm.Schema, tableName)
 	if err != nil {
 		return err
 	}
@@ -80,6 +84,9 @@ func (tm *TableManager) refreshTableStructure(ctx context.Context, tableName str
 			Role: role,
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
 
 	if len(cols) > 0 {
 		tm.tablesMutex.Lock()
@@ -90,6 +97,11 @@ func (tm *TableManager) refreshTableStructure(ctx context.Context, tableName str
 	return nil
 }
 
+// EnsureStructure ensures that the table identified by tableName contains the provided columns.
+//
+// createTemplates and addColumnTemplates are the templates which are executed in the event of table create or alter
+// (respectively).
+// metricsTableName and tagsTableName are passed to the templates.
 func (tm *TableManager) EnsureStructure(
 	ctx context.Context,
 	db dbh,
@@ -110,7 +122,7 @@ func (tm *TableManager) EnsureStructure(
 	tm.tablesMutex.RUnlock()
 	if !ok {
 		// We don't know about the table. First try to query it.
-		if err := tm.refreshTableStructure(ctx, tableName); err != nil {
+		if err := tm.refreshTableStructure(ctx, db, tableName); err != nil {
 			return nil, fmt.Errorf("querying table structure: %w", err)
 		}
 		tm.tablesMutex.RLock()
@@ -236,7 +248,7 @@ func (tm *TableManager) executeTemplates(
 		return err
 	}
 
-	return tm.refreshTableStructure(ctx, tableName)
+	return tm.refreshTableStructure(ctx, db, tableName)
 }
 
 func colMapToSlice(colMap map[string]utils.Column) []utils.Column {
@@ -257,7 +269,7 @@ func colMapToSlice(colMap map[string]utils.Column) []utils.Column {
 func (tm *TableManager) MatchSource(ctx context.Context, db dbh, rowSource *TableSource) error {
 	metricTableName := rowSource.Name()
 	var tagTableName string
-	if tm.TagsAsForeignkeys {
+	if tm.TagsAsForeignKeys {
 		tagTableName = metricTableName + tm.TagTableSuffix
 
 		missingCols, err := tm.EnsureStructure(
@@ -280,7 +292,7 @@ func (tm *TableManager) MatchSource(ctx context.Context, db dbh, rowSource *Tabl
 				rowSource.DropColumn(col)
 				colDefs[i] = col.Name + " " + string(col.Type)
 			}
-			log.Printf("[outputs.postgresql] Error: table '%s' is missing tag columns (dropping metrics): %s", tagTableName, strings.Join(colDefs, ", "))
+			tm.Logger.Errorf("table '%s' is missing tag columns (dropping metrics): %s", tagTableName, strings.Join(colDefs, ", "))
 		}
 	}
 
@@ -304,7 +316,7 @@ func (tm *TableManager) MatchSource(ctx context.Context, db dbh, rowSource *Tabl
 			rowSource.DropColumn(col)
 			colDefs[i] = col.Name + " " + string(col.Type)
 		}
-		log.Printf("[outputs.postgresql] Error: table '%s' is missing columns (dropping fields): %s", metricTableName, strings.Join(colDefs, ", "))
+		tm.Logger.Errorf("table '%s' is missing columns (dropping fields): %s", metricTableName, strings.Join(colDefs, ", "))
 	}
 
 	return nil

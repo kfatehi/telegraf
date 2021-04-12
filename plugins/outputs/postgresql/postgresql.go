@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/influxdata/telegraf/internal"
-	"github.com/influxdata/telegraf/plugins/outputs/postgresql/template"
-	"github.com/jackc/pgconn"
-	"log"
 	"time"
+
+	"github.com/jackc/pgconn"
+
+	"github.com/influxdata/telegraf/config"
+	"github.com/influxdata/telegraf/models"
+	"github.com/influxdata/telegraf/plugins/outputs/postgresql/template"
 
 	"github.com/jackc/pgx/v4"
 	"github.com/jackc/pgx/v4/pgxpool"
@@ -28,7 +30,7 @@ type dbh interface {
 type Postgresql struct {
 	Connection                 string
 	Schema                     string
-	TagsAsForeignkeys          bool
+	TagsAsForeignKeys          bool
 	TagsAsJsonb                bool
 	FieldsAsJsonb              bool
 	CreateTemplates            []*template.Template
@@ -36,8 +38,9 @@ type Postgresql struct {
 	TagTableCreateTemplates    []*template.Template
 	TagTableAddColumnTemplates []*template.Template
 	TagTableSuffix             string
-	PoolSize                   int
-	RetryMaxBackoff            internal.Duration
+	RetryMaxBackoff            config.Duration
+	ForignTagConstraint        bool
+	LogLevel                   string
 
 	dbContext       context.Context
 	dbContextCancel func()
@@ -45,6 +48,8 @@ type Postgresql struct {
 	tableManager    *TableManager
 
 	writeChan chan *TableSource
+
+	Logger telegraf.Logger
 }
 
 func init() {
@@ -59,22 +64,58 @@ func newPostgresql() *Postgresql {
 		TagTableCreateTemplates:    []*template.Template{template.TagTableCreateTemplate},
 		TagTableAddColumnTemplates: []*template.Template{template.TableAddColumnTemplate},
 		TagTableSuffix:             "_tag",
-		RetryMaxBackoff:            internal.Duration{time.Second * 15},
+		RetryMaxBackoff:            config.Duration(time.Second * 15),
+		ForignTagConstraint:        false,
+		Logger:                     models.NewLogger("outputs", "postgresql", ""),
+	}
+}
+
+// pgxLogger makes telegraf.Logger compatible with pgx.Logger
+type pgxLogger struct {
+	telegraf.Logger
+}
+
+func (l pgxLogger) Log(ctx context.Context, level pgx.LogLevel, msg string, data map[string]interface{}) {
+	switch level {
+	case pgx.LogLevelError:
+		l.Errorf("PG %s - %+v", msg, data)
+	case pgx.LogLevelWarn:
+		l.Warnf("PG %s - %+v", msg, data)
+	case pgx.LogLevelInfo, pgx.LogLevelNone:
+		l.Infof("PG %s - %+v", msg, data)
+	case pgx.LogLevelDebug, pgx.LogLevelTrace:
+		l.Debugf("PG %s - %+v", msg, data)
+	default:
+		l.Debugf("PG %s - %+v", msg, data)
 	}
 }
 
 // Connect establishes a connection to the target database and prepares the cache
 func (p *Postgresql) Connect() error {
-	poolConfig, err := pgxpool.ParseConfig("pool_max_conns=1 " + p.Connection)
+	poolConfig, err := pgxpool.ParseConfig(p.Connection)
 	if err != nil {
 		return err
+	}
+	parsedConfig, _ := pgx.ParseConfig(p.Connection)
+	if _, ok := parsedConfig.Config.RuntimeParams["pool_max_conns"]; !ok {
+		// The pgx default for pool_max_conns is 4. However we want to default to 1.
+		poolConfig.MaxConns = 1
+	}
+	poolConfig.AfterConnect = p.dbConnectedHook
+
+	if p.LogLevel != "" {
+		poolConfig.ConnConfig.Logger = pgxLogger{p.Logger}
+		poolConfig.ConnConfig.LogLevel, err = pgx.LogLevelFromString(p.LogLevel)
+		if err != nil {
+			return fmt.Errorf("invalid log level")
+		}
 	}
 
 	// Yes, we're not supposed to store the context. However since we don't receive a context, we have to.
 	p.dbContext, p.dbContextCancel = context.WithCancel(context.Background())
 	p.db, err = pgxpool.ConnectConfig(p.dbContext, poolConfig)
 	if err != nil {
-		log.Printf("E! Couldn't connect to server\n%v", err)
+		p.Logger.Errorf("Couldn't connect to server\n%v", err)
 		return err
 	}
 	p.tableManager = NewTableManager(p)
@@ -91,6 +132,7 @@ func (p *Postgresql) Connect() error {
 }
 
 // dbConnectHook checks to see whether we lost all connections, and if so resets any known state of the database (e.g. cached tables).
+// This is so that we handle failovers, where the new database might not have the same state as the previous.
 func (p *Postgresql) dbConnectedHook(ctx context.Context, conn *pgx.Conn) error {
 	if p.db == nil || p.tableManager == nil {
 		// This will happen on the initial connect since we haven't set it yet.
@@ -110,9 +152,9 @@ func (p *Postgresql) dbConnectedHook(ctx context.Context, conn *pgx.Conn) error 
 
 // Close closes the connection to the database
 func (p *Postgresql) Close() error {
-	p.tableManager = nil
 	p.dbContextCancel()
 	p.db.Close()
+	p.tableManager = nil
 	return nil
 }
 
@@ -157,14 +199,15 @@ var sampleConfig = `
   create_templates = ['CREATE TABLE {{.table}} ({{.columns}})']
 
   ## Templated statements to execute when adding columns to a table.
-  ## Set to an empty list to disable. When doing so, points will be inserted with the missing fields/columns omitted.
+  ## Set to an empty list to disable. Points containing tags for which there is no column will be skipped. Points
+  ## containing fields for which there is no column will have the field omitted.
   add_column_templates = ['ALTER TABLE {{.table}} ADD COLUMN IF NOT EXISTS {{.columns|join ", ADD COLUMN IF NOT EXISTS "}}']
 
   ## Templated statements to execute when creating a new tag table.
   tag_table_create_templates = ['CREATE TABLE {{.table}} ({{.columns}}, PRIMARY KEY (tag_id))']
 
   ## Templated statements to execute when adding columns to a tag table.
-  ## Set to an empty list to disable. When doing so, points containing the missing tags will be omitted.
+  ## Set to an empty list to disable. Points containing tags for which there is no column will be skipped.
   tag_table_add_column_templates = ['ALTER TABLE {{.table}} ADD COLUMN IF NOT EXISTS {{.columns|join ", ADD COLUMN IF NOT EXISTS "}}']
 `
 
@@ -172,16 +215,7 @@ func (p *Postgresql) SampleConfig() string { return sampleConfig }
 func (p *Postgresql) Description() string  { return "Send metrics to PostgreSQL" }
 
 func (p *Postgresql) Write(metrics []telegraf.Metric) error {
-	tableSources := map[string]*TableSource{}
-
-	for _, m := range metrics {
-		rs := tableSources[m.Name()]
-		if rs == nil {
-			rs = NewTableSource(p)
-			tableSources[m.Name()] = rs
-		}
-		rs.AddMetric(m)
-	}
+	tableSources := NewTableSources(p, metrics)
 
 	if p.db.Stat().MaxConns() > 1 {
 		return p.writeConcurrent(tableSources)
@@ -203,7 +237,7 @@ func (p *Postgresql) writeSequential(tableSources map[string]*TableSource) error
 			if isTempError(err) {
 				return err
 			}
-			log.Printf("write error (permanent, dropping sub-batch): %v", err)
+			p.Logger.Errorf("write error (permanent, dropping sub-batch): %v", err)
 		}
 	}
 
@@ -229,7 +263,7 @@ func (p *Postgresql) writeWorker(ctx context.Context) {
 		select {
 		case tableSource := <-p.writeChan:
 			if err := p.writeRetry(ctx, tableSource); err != nil {
-				log.Printf("write error (permanent, dropping sub-batch): %v", err)
+				p.Logger.Errorf("write error (permanent, dropping sub-batch): %v", err)
 			}
 		case <-p.dbContext.Done():
 			return
@@ -237,29 +271,59 @@ func (p *Postgresql) writeWorker(ctx context.Context) {
 	}
 }
 
+// This is a subset of net.Error
+type maybeTempError interface {
+	error
+	Temporary() bool
+}
+
+// isTempError reports whether the error received during a metric write operation is temporary or permanent.
+// A temporary error is one that if the write were retried at a later time, that it might succeed.
+// Note however that this applies to the transaction as a whole, not the individual operation. Meaning for example a
+// write might come in that needs a new table created, but another worker already created the table in between when we
+// checked for it, and tried to create it. In this case, the operation error is permanent, as we can try `CREATE TABLE`
+// again and it will still fail. But if we retry the transaction from scratch, when we perform the table check we'll see
+// it exists, so we consider the error temporary.
 func isTempError(err error) bool {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr); pgErr != nil {
+		// https://www.postgresql.org/docs/12/errcodes-appendix.html
+		errClass := pgErr.Code[:2]
+		switch errClass {
+		case "42": // Syntax Error or Access Rule Violation
+			switch pgErr.Code {
+			case "42701": // duplicate_column
+				return true
+			case "42P07": // duplicate_table
+				return true
+			}
+		case "53": // Insufficient Resources
+			return true
+		case "57": // Operator Intervention
+			return true
+		}
+		// Assume that any other error that comes from postgres is a permanent error
 		return false
 	}
-	//TODO review:
-	// https://godoc.org/github.com/jackc/pgerrcode
-	// https://www.postgresql.org/docs/10/errcodes-appendix.html
-	return true
+
+	if mtErr := maybeTempError(nil); errors.As(err, &mtErr) {
+		return mtErr.Temporary()
+	}
+
+	// Assume that any other error is permanent.
+	// This may mean that we incorrectly discard data that could have been retried, but the alternative is that we get
+	// stuck retrying data that will never succeed, causing good data to be dropped because the buffer fills up.
+	return false
 }
 
 func (p *Postgresql) writeRetry(ctx context.Context, tableSource *TableSource) error {
 	backoff := time.Duration(0)
 	for {
-		err := p.writeMetricsFromMeasure(ctx, p.db, tableSource)
-		if err == nil {
-			return nil
-		}
-
+		err := p.writeMetricsFromMeasureTx(ctx, tableSource)
 		if !isTempError(err) {
 			return err
 		}
-		log.Printf("write error (retry in %s): %v", backoff, err)
+		p.Logger.Errorf("write error (retry in %s): %v", backoff, err)
 		tableSource.Reset()
 		time.Sleep(backoff)
 
@@ -267,11 +331,25 @@ func (p *Postgresql) writeRetry(ctx context.Context, tableSource *TableSource) e
 			backoff = time.Millisecond * 250
 		} else {
 			backoff *= 2
-			if backoff > p.RetryMaxBackoff.Duration {
-				backoff = p.RetryMaxBackoff.Duration
+			if backoff > time.Duration(p.RetryMaxBackoff) {
+				backoff = time.Duration(p.RetryMaxBackoff)
 			}
 		}
 	}
+}
+
+func (p *Postgresql) writeMetricsFromMeasureTx(ctx context.Context, tableSource *TableSource) error {
+	tx, err := p.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	if err := p.writeMetricsFromMeasure(ctx, tx, tableSource); err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
 }
 
 // Writes the metrics from a specified measure. All the provided metrics must belong to the same measurement.
@@ -281,11 +359,15 @@ func (p *Postgresql) writeMetricsFromMeasure(ctx context.Context, db dbh, tableS
 		return err
 	}
 
-	if p.TagsAsForeignkeys {
+	if p.TagsAsForeignKeys {
 		if err := p.WriteTagTable(ctx, db, tableSource); err != nil {
 			// log and continue. As the admin can correct the issue, and tags don't change over time, they can be added from
 			// future metrics after issue is corrected.
-			log.Printf("[outputs.postgresql] Error: Writing to tag table '%s': %s", tableSource.Name()+p.TagTableSuffix, err)
+			if p.ForignTagConstraint {
+				return fmt.Errorf("writing to tag table '%s': %s", tableSource.Name()+p.TagTableSuffix, err)
+			} else {
+				p.Logger.Errorf("writing to tag table '%s': %s", tableSource.Name()+p.TagTableSuffix, err)
+			}
 		}
 	}
 
@@ -306,7 +388,8 @@ func (p *Postgresql) WriteTagTable(ctx context.Context, db dbh, tableSource *Tab
 
 	ident := pgx.Identifier{ttsrc.postgresql.Schema, ttsrc.Name()}
 	identTemp := pgx.Identifier{ttsrc.Name() + "_temp"}
-	_, err = tx.Exec(ctx, fmt.Sprintf("CREATE TEMP TABLE %s (LIKE %s) ON COMMIT DROP", identTemp.Sanitize(), ident.Sanitize()))
+	sql := fmt.Sprintf("CREATE TEMP TABLE %s (LIKE %s) ON COMMIT DROP", identTemp.Sanitize(), ident.Sanitize())
+	_, err = tx.Exec(ctx, sql)
 	if err != nil {
 		return fmt.Errorf("creating tags temp table: %w", err)
 	}

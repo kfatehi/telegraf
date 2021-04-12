@@ -14,7 +14,7 @@ type TableSource struct {
 	cursorValues []interface{}
 	cursorError  error
 
-	// tagPositions is the position of each tag within the tag set. Regardless of whether tags are foreign keys or not
+	// tagPositions is the position of each tag within the tag set, regardless of whether tags are foreign keys or not.
 	tagPositions map[string]int
 	// tagColumns is the list of tags to emit. List is in order.
 	tagColumns []utils.Column
@@ -23,12 +23,27 @@ type TableSource struct {
 	// This data is used to build out the foreign tag table when enabled.
 	tagSets map[int64][]*telegraf.Tag
 
-	// fieldPositions is the position of each field within the tag set.
+	// fieldPositions is the position of each field within the field list.
 	fieldPositions map[string]int
 	// fieldColumns is the list of fields to emit. List is in order.
 	fieldColumns []utils.Column
 
 	droppedTagColumns []string
+}
+
+func NewTableSources(p *Postgresql, metrics []telegraf.Metric) map[string]*TableSource {
+	tableSources := map[string]*TableSource{}
+
+	for _, m := range metrics {
+		tsrc := tableSources[m.Name()]
+		if tsrc == nil {
+			tsrc = NewTableSource(p)
+			tableSources[m.Name()] = tsrc
+		}
+		tsrc.AddMetric(m)
+	}
+
+	return tableSources
 }
 
 func NewTableSource(postgresql *Postgresql) *TableSource {
@@ -37,15 +52,17 @@ func NewTableSource(postgresql *Postgresql) *TableSource {
 		cursor:     -1,
 		tagSets:    make(map[int64][]*telegraf.Tag),
 	}
-	if !postgresql.FieldsAsJsonb {
+	if !postgresql.TagsAsJsonb {
 		tsrc.tagPositions = map[string]int{}
+	}
+	if !postgresql.FieldsAsJsonb {
 		tsrc.fieldPositions = map[string]int{}
 	}
 	return tsrc
 }
 
 func (tsrc *TableSource) AddMetric(metric telegraf.Metric) {
-	if tsrc.postgresql.TagsAsForeignkeys {
+	if tsrc.postgresql.TagsAsForeignKeys {
 		tagID := utils.GetTagID(metric)
 		if _, ok := tsrc.tagSets[tagID]; !ok {
 			tsrc.tagSets[tagID] = metric.TagList()
@@ -104,7 +121,7 @@ func (tsrc *TableSource) MetricTableColumns() []utils.Column {
 		TimeColumn,
 	}
 
-	if tsrc.postgresql.TagsAsForeignkeys {
+	if tsrc.postgresql.TagsAsForeignKeys {
 		cols = append(cols, TagIDColumn)
 	} else {
 		cols = append(cols, tsrc.TagColumns()...)
@@ -138,6 +155,9 @@ func (tsrc *TableSource) ColumnNames() []string {
 	return names
 }
 
+// Drops the specified column.
+// If column is a tag column, any metrics containing the tag will be skipped.
+// If column is a field column, any metrics containing the field will have it omitted.
 func (tsrc *TableSource) DropColumn(col utils.Column) {
 	switch col.Role {
 	case utils.TagColType:
@@ -233,7 +253,7 @@ func (tsrc *TableSource) values() ([]interface{}, error) {
 
 	values = append(values, metric.Time())
 
-	if !tsrc.postgresql.TagsAsForeignkeys {
+	if !tsrc.postgresql.TagsAsForeignKeys {
 		if !tsrc.postgresql.TagsAsJsonb {
 			// tags_as_foreignkey=false, tags_as_json=false
 			tagValues := make([]interface{}, len(tsrc.tagPositions))
@@ -253,9 +273,11 @@ func (tsrc *TableSource) values() ([]interface{}, error) {
 	} else {
 		// tags_as_foreignkey=true
 		tagID := utils.GetTagID(metric)
-		if _, ok := tsrc.tagSets[tagID]; !ok {
-			// tag has been dropped, we can't emit or we risk collision with another metric
-			return nil, nil
+		if tsrc.postgresql.ForignTagConstraint {
+			if _, ok := tsrc.tagSets[tagID]; !ok {
+				// tag has been dropped
+				return nil, nil
+			}
 		}
 		values = append(values, tagID)
 	}
