@@ -181,9 +181,9 @@ func (tm *TableManager) executeTemplates(
 	metricsTableName string,
 	tagsTableName string,
 ) error {
-	tmplTable := template.NewTemplateTable(tm.Schema, tableName, colMapToSlice(tm.Tables[tableName]))
-	metricsTmplTable := template.NewTemplateTable(tm.Schema, metricsTableName, colMapToSlice(tm.Tables[metricsTableName]))
-	tagsTmplTable := template.NewTemplateTable(tm.Schema, tagsTableName, colMapToSlice(tm.Tables[tagsTableName]))
+	tmplTable := template.NewTable(tm.Schema, tableName, colMapToSlice(tm.Tables[tableName]))
+	metricsTmplTable := template.NewTable(tm.Schema, metricsTableName, colMapToSlice(tm.Tables[metricsTableName]))
+	tagsTmplTable := template.NewTable(tm.Schema, tagsTableName, colMapToSlice(tm.Tables[tagsTableName]))
 
 	/* https://github.com/jackc/pgx/issues/872
 	stmts := make([]string, len(tmpls))

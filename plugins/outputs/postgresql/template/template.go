@@ -11,21 +11,21 @@ Variables
 
 The following variables are available within all template executions:
 
- * table - A TemplateTable object referring to the current table being
+ * table - A Table object referring to the current table being
    created/modified.
 
- * columns - A TemplateColumns object of the new columns being added to the
+ * columns - A Columns object of the new columns being added to the
    table (all columns in the case of a new table, and new columns in the case
    of existing table).
 
- * allColumns - A TemplateColumns object of all the columns (both old and new)
+ * allColumns - A Columns object of all the columns (both old and new)
    of the table. In the case of a new table, this is the same as `columns`.
 
- * metricTable - A TemplateTable object referring to the table containing the
+ * metricTable - A Table object referring to the table containing the
    fields. In the case of TagsAsForeignKeys and `table` is the tag table, then
    `metricTable` is the table using this one for its tags.
 
- * tagTable - A TemplateTable object referring to the table containing the
+ * tagTable - A Table object referring to the table containing the
    tags. In the case of TagsAsForeignKeys and `table` is the metrics table,
    then `tagTable` is the table containing the tags for this one.
 
@@ -161,85 +161,85 @@ func QuoteLiteral(str interface{}) string {
 	return "'" + strings.ReplaceAll(asString(str), "'", "''") + "'"
 }
 
-// TemplateTable is an object which represents a Postgres table.
-type TemplateTable struct {
+// Table is an object which represents a Postgres table.
+type Table struct {
 	Schema  string
 	Name    string
-	Columns TemplateColumns
+	Columns Columns
 }
 
-func NewTemplateTable(schemaName, tableName string, columns []utils.Column) *TemplateTable {
+func NewTable(schemaName, tableName string, columns []utils.Column) *Table {
 	if tableName == "" {
 		return nil
 	}
-	return &TemplateTable{
+	return &Table{
 		Schema:  schemaName,
 		Name:    tableName,
-		Columns: NewTemplateColumns(columns),
+		Columns: NewColumns(columns),
 	}
 }
 
 // String returns the table's fully qualified & quoted identifier (schema+table).
-func (tt *TemplateTable) String() string {
-	return tt.Identifier()
+func (tbl *Table) String() string {
+	return tbl.Identifier()
 }
 
 // Identifier returns the table's fully qualified & quoted identifier (schema+table).
 //
 // If schema is empty, it is omitted from the result.
-func (tt *TemplateTable) Identifier() string {
-	if tt.Schema == "" {
-		return QuoteIdentifier(tt.Name)
+func (tbl *Table) Identifier() string {
+	if tbl.Schema == "" {
+		return QuoteIdentifier(tbl.Name)
 	}
-	return QuoteIdentifier(tt.Schema) + "." + QuoteIdentifier(tt.Name)
+	return QuoteIdentifier(tbl.Schema) + "." + QuoteIdentifier(tbl.Name)
 }
 
-// WithSchema returns a copy of the TemplateTable object, but with the schema replaced by the given value.
-func (tt *TemplateTable) WithSchema(name string) *TemplateTable {
-	ttNew := &TemplateTable{}
-	*ttNew = *tt
-	ttNew.Schema = name
-	return ttNew
+// WithSchema returns a copy of the Table object, but with the schema replaced by the given value.
+func (tbl *Table) WithSchema(name string) *Table {
+	tblNew := &Table{}
+	*tblNew = *tbl
+	tblNew.Schema = name
+	return tblNew
 }
 
-// WithName returns a copy of the TemplateTable object, but with the name replaced by the given value.
-func (tt *TemplateTable) WithName(name string) *TemplateTable {
-	ttNew := &TemplateTable{}
-	*ttNew = *tt
-	ttNew.Name = name
-	return ttNew
+// WithName returns a copy of the Table object, but with the name replaced by the given value.
+func (tbl *Table) WithName(name string) *Table {
+	tblNew := &Table{}
+	*tblNew = *tbl
+	tblNew.Name = name
+	return tblNew
 }
 
-// WithSuffix returns a copy of the TemplateTable object, but with the name suffixed with the given value.
-func (tt *TemplateTable) WithSuffix(suffixes ...string) *TemplateTable {
-	ttNew := &TemplateTable{}
-	*ttNew = *tt
-	ttNew.Name += strings.Join(suffixes, "")
-	return ttNew
+// WithSuffix returns a copy of the Table object, but with the name suffixed with the given value.
+func (tbl *Table) WithSuffix(suffixes ...string) *Table {
+	tblNew := &Table{}
+	*tblNew = *tbl
+	tblNew.Name += strings.Join(suffixes, "")
+	return tblNew
 }
 
-// A TemplateColumn is an object which represents a Postgres column.
-type TemplateColumn utils.Column
+// A Column is an object which represents a Postgres column.
+type Column utils.Column
 
 // String returns the column's definition (as used in a CREATE TABLE statement). E.G:
 //  "my_column" bigint
-func (tc TemplateColumn) String() string {
+func (tc Column) String() string {
 	return tc.Definition()
 }
 
 // Definition returns the column's definition (as used in a CREATE TABLE statement). E.G:
 //  "my_column" bigint
-func (tc TemplateColumn) Definition() string {
+func (tc Column) Definition() string {
 	return tc.Identifier() + " " + string(tc.Type)
 }
 
 // Identifier returns the column's quoted identifier.
-func (tc TemplateColumn) Identifier() string {
+func (tc Column) Identifier() string {
 	return QuoteIdentifier(tc.Name)
 }
 
 // Selector returns the selector for the column. For most cases this is the same as Identifier. However in some cases, such as a UNION, this may return a statement such as `NULL AS "foo"`.
-func (tc TemplateColumn) Selector() string {
+func (tc Column) Selector() string {
 	if tc.Type != "" {
 		return tc.Identifier()
 	}
@@ -247,92 +247,92 @@ func (tc TemplateColumn) Selector() string {
 }
 
 // IsTag returns true if the column is a tag column. Otherwise false.
-func (tc TemplateColumn) IsTag() bool {
+func (tc Column) IsTag() bool {
 	return tc.Role == utils.TagColType
 }
 
 // IsField returns true if the column is a field column. Otherwise false.
-func (tc TemplateColumn) IsField() bool {
+func (tc Column) IsField() bool {
 	return tc.Role == utils.FieldColType
 }
 
-// TemplateColumns represents an ordered list of TemplateColumn objects, with convenience methods for operating on the
+// Columns represents an ordered list of Column objects, with convenience methods for operating on the
 // list.
-type TemplateColumns []TemplateColumn
+type Columns []Column
 
-func NewTemplateColumns(cols []utils.Column) TemplateColumns {
-	tcs := make(TemplateColumns, len(cols))
+func NewColumns(cols []utils.Column) Columns {
+	tcols := make(Columns, len(cols))
 	for i, col := range cols {
-		tcs[i] = TemplateColumn(col)
+		tcols[i] = Column(col)
 	}
-	return tcs
+	return tcols
 }
 
-// List returns the TemplateColumns object as a slice of TemplateColumn.
-func (tcs TemplateColumns) List() []TemplateColumn {
-	return tcs
+// List returns the Columns object as a slice of Column.
+func (cols Columns) List() []Column {
+	return cols
 }
 
 // Definitions returns the list of column definitions.
-func (tcs TemplateColumns) Definitions() []string {
-	defs := make([]string, len(tcs))
-	for i, tc := range tcs {
+func (cols Columns) Definitions() []string {
+	defs := make([]string, len(cols))
+	for i, tc := range cols {
 		defs[i] = tc.Definition()
 	}
 	return defs
 }
 
 // Identifiers returns the list of quoted column identifiers.
-func (tcs TemplateColumns) Identifiers() []string {
-	idents := make([]string, len(tcs))
-	for i, tc := range tcs {
+func (cols Columns) Identifiers() []string {
+	idents := make([]string, len(cols))
+	for i, tc := range cols {
 		idents[i] = tc.Identifier()
 	}
 	return idents
 }
 
 // Selectors returns the list of column selectors.
-func (tcs TemplateColumns) Selectors() []string {
-	selectors := make([]string, len(tcs))
-	for i, tc := range tcs {
+func (cols Columns) Selectors() []string {
+	selectors := make([]string, len(cols))
+	for i, tc := range cols {
 		selectors[i] = tc.Selector()
 	}
 	return selectors
 }
 
 // String returns the comma delimited list of column identifiers.
-func (tcs TemplateColumns) String() string {
-	colStrs := make([]string, len(tcs))
-	for i, tc := range tcs {
+func (cols Columns) String() string {
+	colStrs := make([]string, len(cols))
+	for i, tc := range cols {
 		colStrs[i] = tc.String()
 	}
 	return strings.Join(colStrs, ", ")
 }
 
-// Keys returns a TemplateColumns list of the columns which are not fields (e.g. time, tag_id, & tags).
-func (tcs TemplateColumns) Keys() TemplateColumns {
-	var cols []TemplateColumn
-	for _, tc := range tcs {
+// Keys returns a Columns list of the columns which are not fields (e.g. time, tag_id, & tags).
+func (cols Columns) Keys() Columns {
+	var newCols []Column
+	for _, tc := range cols {
 		if tc.Role != utils.FieldColType {
-			cols = append(cols, tc)
+			newCols = append(newCols, tc)
 		}
 	}
-	return cols
+	return newCols
 }
 
-// Sorted returns a sorted copy of TemplateColumns.
+// Sorted returns a sorted copy of Columns.
 //
 // Columns are sorted so that they are in order as: [Time, Tags, Fields], with the columns within each group sorted
 // alphabetically.
-func (tcs TemplateColumns) Sorted() TemplateColumns {
-	cols := append([]TemplateColumn{}, tcs...)
-	(*utils.ColumnList)(unsafe.Pointer(&cols)).Sort()
-	return cols
+func (cols Columns) Sorted() Columns {
+	newCols := append([]Column{}, cols...)
+	(*utils.ColumnList)(unsafe.Pointer(&newCols)).Sort()
+	return newCols
 }
 
-// Concat returns a copy of TemplateColumns with the given tcsList appended to the end.
-func (tcs TemplateColumns) Concat(tcsList ...TemplateColumns) TemplateColumns {
-	tcsNew := append(TemplateColumns{}, tcs...)
+// Concat returns a copy of Columns with the given tcsList appended to the end.
+func (cols Columns) Concat(tcsList ...Columns) Columns {
+	tcsNew := append(Columns{}, cols...)
 	for _, tcs := range tcsList {
 		tcsNew = append(tcsNew, tcs...)
 	}
@@ -342,10 +342,10 @@ func (tcs TemplateColumns) Concat(tcsList ...TemplateColumns) TemplateColumns {
 // Union generates a list of SQL selectors against the given columns.
 //
 // For each column in tcs, if the column also exist in tcsFrom, it will be selected. If the column does not exist NULL will be selected.
-func (tcs TemplateColumns) Union(tcsFrom TemplateColumns) TemplateColumns {
-	tcsNew := append(TemplateColumns{}, tcs...)
+func (cols Columns) Union(tcsFrom Columns) Columns {
+	tcsNew := append(Columns{}, cols...)
 TCS:
-	for i, tc := range tcs {
+	for i, tc := range cols {
 		for _, tcFrom := range tcsFrom {
 			if tc.Name == tcFrom.Name {
 				continue TCS
@@ -356,34 +356,34 @@ TCS:
 	return tcsNew
 }
 
-// Tags returns a TemplateColumns list of the columns which are tags.
-func (tcs TemplateColumns) Tags() TemplateColumns {
-	var cols []TemplateColumn
-	for _, tc := range tcs {
+// Tags returns a Columns list of the columns which are tags.
+func (cols Columns) Tags() Columns {
+	var newCols []Column
+	for _, tc := range cols {
 		if tc.Role == utils.TagColType {
-			cols = append(cols, tc)
+			newCols = append(newCols, tc)
 		}
 	}
-	return cols
+	return newCols
 }
 
-// Fields returns a TemplateColumns list of the columns which are fields.
-func (tcs TemplateColumns) Fields() TemplateColumns {
-	var cols []TemplateColumn
-	for _, tc := range tcs {
+// Fields returns a Columns list of the columns which are fields.
+func (cols Columns) Fields() Columns {
+	var newCols []Column
+	for _, tc := range cols {
 		if tc.Role == utils.FieldColType {
-			cols = append(cols, tc)
+			newCols = append(newCols, tc)
 		}
 	}
-	return cols
+	return newCols
 }
 
 // Hash returns a hash of the column names. The hash is base-32 encoded string, up to 7 characters long with no padding.
 //
 // This can be useful as an identifier for supporting table renaming + unions in the case of non-modifiable tables.
-func (tcs TemplateColumns) Hash() string {
+func (cols Columns) Hash() string {
 	hash := fnv.New32a()
-	for _, tc := range tcs.Sorted() {
+	for _, tc := range cols.Sorted() {
 		hash.Write([]byte(tc.Name))
 		hash.Write([]byte{0})
 	}
@@ -413,8 +413,8 @@ func (t *Template) UnmarshalText(text []byte) error {
 	return nil
 }
 
-func (t *Template) Render(table *TemplateTable, newColumns []utils.Column, metricTable *TemplateTable, tagTable *TemplateTable) ([]byte, error) {
-	tcs := NewTemplateColumns(newColumns).Sorted()
+func (t *Template) Render(table *Table, newColumns []utils.Column, metricTable *Table, tagTable *Table) ([]byte, error) {
+	tcs := NewColumns(newColumns).Sorted()
 	data := map[string]interface{}{
 		"table":       table,
 		"columns":     tcs,
