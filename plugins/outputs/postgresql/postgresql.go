@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgconn"
@@ -48,6 +49,7 @@ type Postgresql struct {
 	tableManager    *TableManager
 
 	writeChan chan *TableSource
+	writeWaitGroup *utils.WaitGroup
 
 	Logger telegraf.Logger
 }
@@ -123,7 +125,9 @@ func (p *Postgresql) Connect() error {
 	maxConns := int(p.db.Stat().MaxConns())
 	if maxConns > 1 {
 		p.writeChan = make(chan *TableSource)
+		p.writeWaitGroup = utils.NewWaitGroup()
 		for i := 0; i < maxConns; i++ {
+			p.writeWaitGroup.Add(1)
 			go p.writeWorker(p.dbContext)
 		}
 	}
@@ -152,6 +156,16 @@ func (p *Postgresql) dbConnectedHook(ctx context.Context, conn *pgx.Conn) error 
 
 // Close closes the connection to the database
 func (p *Postgresql) Close() error {
+	if p.writeChan != nil {
+		// We're using async mode. Gracefully close with timeout.
+		close(p.writeChan)
+		select {
+		case <-p.writeWaitGroup.C():
+		case <-time.NewTimer(time.Second * 5).C:
+		}
+	}
+
+	// Die!
 	p.dbContextCancel()
 	p.db.Close()
 	p.tableManager = nil
@@ -259,9 +273,13 @@ func (p *Postgresql) writeConcurrent(tableSources map[string]*TableSource) error
 }
 
 func (p *Postgresql) writeWorker(ctx context.Context) {
+	defer p.writeWaitGroup.Done()
 	for {
 		select {
-		case tableSource := <-p.writeChan:
+		case tableSource, ok := <-p.writeChan:
+			if !ok {
+				return
+			}
 			if err := p.writeRetry(ctx, tableSource); err != nil {
 				p.Logger.Errorf("write error (permanent, dropping sub-batch): %v", err)
 			}
@@ -301,6 +319,14 @@ func isTempError(err error) bool {
 			return true
 		case "57": // Operator Intervention
 			return true
+		case "23": // Integrity Constraint Violation
+			switch pgErr.Code {
+			case "23505": // unique_violation
+				if strings.Contains(err.Error(), "pg_type_typname_nsp_index") {
+					// Happens when you try to create 2 tables simultaneously.
+					return true
+				}
+			}
 		}
 		// Assume that any other error that comes from postgres is a permanent error
 		return false
@@ -319,7 +345,7 @@ func isTempError(err error) bool {
 func (p *Postgresql) writeRetry(ctx context.Context, tableSource *TableSource) error {
 	backoff := time.Duration(0)
 	for {
-		err := p.writeMetricsFromMeasureTx(ctx, tableSource)
+		err := p.writeMetricsFromMeasure(ctx, p.db, tableSource)
 		if !isTempError(err) {
 			return err
 		}
@@ -338,20 +364,6 @@ func (p *Postgresql) writeRetry(ctx context.Context, tableSource *TableSource) e
 	}
 }
 
-func (p *Postgresql) writeMetricsFromMeasureTx(ctx context.Context, tableSource *TableSource) error {
-	tx, err := p.db.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-
-	if err := p.writeMetricsFromMeasure(ctx, tx, tableSource); err != nil {
-		return err
-	}
-
-	return tx.Commit(ctx)
-}
-
 // Writes the metrics from a specified measure. All the provided metrics must belong to the same measurement.
 func (p *Postgresql) writeMetricsFromMeasure(ctx context.Context, db dbh, tableSource *TableSource) error {
 	err := p.tableManager.MatchSource(ctx, db, tableSource)
@@ -359,27 +371,38 @@ func (p *Postgresql) writeMetricsFromMeasure(ctx context.Context, db dbh, tableS
 		return err
 	}
 
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
 	if p.TagsAsForeignKeys {
-		if err := p.WriteTagTable(ctx, db, tableSource); err != nil {
-			// log and continue. As the admin can correct the issue, and tags don't change over time, they can be added from
-			// future metrics after issue is corrected.
+		if err := p.WriteTagTable(ctx, tx, tableSource); err != nil {
 			if p.ForignTagConstraint {
 				return fmt.Errorf("writing to tag table '%s': %s", tableSource.Name()+p.TagTableSuffix, err)
 			} else {
+				// log and continue. As the admin can correct the issue, and tags don't change over time, they can be
+				// added from future metrics after issue is corrected.
 				p.Logger.Errorf("writing to tag table '%s': %s", tableSource.Name()+p.TagTableSuffix, err)
 			}
 		}
 	}
 
 	fullTableName := utils.FullTableName(p.Schema, tableSource.Name())
-	_, err = db.CopyFrom(ctx, fullTableName, tableSource.ColumnNames(), tableSource)
-	return err
+	if _, err := tx.CopyFrom(ctx, fullTableName, tableSource.ColumnNames(), tableSource); err != nil {
+		return err
+	}
+
+	tx.Commit(ctx)
+	return nil
 }
 
 func (p *Postgresql) WriteTagTable(ctx context.Context, db dbh, tableSource *TableSource) error {
 	//TODO cache which tagSets we've already inserted and skip them.
 	ttsrc := NewTagTableSource(tableSource)
 
+	// need a transaction so that if it errors, we don't roll back the parent transaction, just the tags
 	tx, err := db.Begin(ctx)
 	if err != nil {
 		return err
@@ -389,8 +412,7 @@ func (p *Postgresql) WriteTagTable(ctx context.Context, db dbh, tableSource *Tab
 	ident := pgx.Identifier{ttsrc.postgresql.Schema, ttsrc.Name()}
 	identTemp := pgx.Identifier{ttsrc.Name() + "_temp"}
 	sql := fmt.Sprintf("CREATE TEMP TABLE %s (LIKE %s) ON COMMIT DROP", identTemp.Sanitize(), ident.Sanitize())
-	_, err = tx.Exec(ctx, sql)
-	if err != nil {
+	if _, err := tx.Exec(ctx, sql); err != nil {
 		return fmt.Errorf("creating tags temp table: %w", err)
 	}
 
@@ -398,7 +420,7 @@ func (p *Postgresql) WriteTagTable(ctx context.Context, db dbh, tableSource *Tab
 		return fmt.Errorf("copying into tags temp table: %w", err)
 	}
 
-	if _, err := tx.Exec(ctx, fmt.Sprintf("INSERT INTO %s SELECT * FROM %s ON CONFLICT (tag_id) DO NOTHING", ident.Sanitize(), identTemp.Sanitize())); err != nil {
+	if _, err := tx.Exec(ctx, fmt.Sprintf("INSERT INTO %s SELECT * FROM %s ORDER BY tag_id ON CONFLICT (tag_id) DO NOTHING", ident.Sanitize(), identTemp.Sanitize())); err != nil {
 		return fmt.Errorf("inserting into tags table: %w", err)
 	}
 

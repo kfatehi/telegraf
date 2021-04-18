@@ -6,6 +6,7 @@ import (
 	"hash/fnv"
 	"log"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v4"
@@ -144,4 +145,38 @@ func GetTagID(metric telegraf.Metric) int64 {
 	}
 	// Convert to int64 as postgres does not support uint64
 	return int64(hash.Sum64())
+}
+
+// WaitGroup is similar to sync.WaitGroup, but allows interruptable waiting (e.g. a timeout).
+type WaitGroup struct {
+	count int32
+	done chan struct{}
+}
+func NewWaitGroup() *WaitGroup {
+	return &WaitGroup{
+		done: make(chan struct{}),
+	}
+}
+
+func (wg *WaitGroup) Add(i int32) {
+	select {
+	case <-wg.done:
+		panic("use of an already-done WaitGroup")
+	default:
+	}
+	atomic.AddInt32(&wg.count, i)
+}
+
+func (wg *WaitGroup) Done() {
+	i := atomic.AddInt32(&wg.count, -1)
+	if i == 0 {
+		close(wg.done)
+	}
+	if i < 0 {
+		panic("too many Done() calls")
+	}
+}
+
+func (wg *WaitGroup) C() <-chan struct{} {
+	return wg.done
 }

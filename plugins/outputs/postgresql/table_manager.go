@@ -6,6 +6,7 @@ import (
 	"github.com/influxdata/telegraf/plugins/outputs/postgresql/template"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/influxdata/telegraf/plugins/outputs/postgresql/utils"
 )
@@ -18,12 +19,34 @@ const (
 	`
 )
 
+type tableState struct {
+	name string
+	// The atomic.Value protects columns from simple data race corruption as columns can be read while the mutex is
+	// locked.
+	columns atomic.Value
+	// The mutex protects columns when doing a check-and-set operation. It prevents 2 goroutines from independently
+	// checking the table's schema, and both trying to modify it, whether inconsistently, or to the same result.
+	sync.Mutex
+}
+func (ts *tableState) Columns() map[string]utils.Column {
+	cols := ts.columns.Load()
+	if cols == nil {
+		return nil
+	}
+	return cols.(map[string]utils.Column)
+}
+func (ts *tableState) SetColumns(cols map[string]utils.Column) {
+	ts.columns.Store(cols)
+}
+
 type TableManager struct {
 	*Postgresql
 
 	// map[tableName]map[columnName]utils.Column
-	Tables      map[string]map[string]utils.Column
-	tablesMutex sync.RWMutex
+	tables      map[string]*tableState
+	tablesMutex sync.Mutex
+	// schemaMutex is used to prevent parallel table creations/alters in Postgres.
+	schemaMutex sync.Mutex
 }
 
 // NewTableManager returns an instance of the tables.Manager interface
@@ -31,19 +54,32 @@ type TableManager struct {
 func NewTableManager(postgresql *Postgresql) *TableManager {
 	return &TableManager{
 		Postgresql: postgresql,
-		Tables:     make(map[string]map[string]utils.Column),
+		tables:     make(map[string]*tableState),
 	}
 }
 
 // ClearTableCache clear the table structure cache.
 func (tm *TableManager) ClearTableCache() {
 	tm.tablesMutex.Lock()
-	tm.Tables = make(map[string]map[string]utils.Column)
+	for _, tbl := range tm.tables {
+		tbl.SetColumns(nil)
+	}
 	tm.tablesMutex.Unlock()
 }
 
-func (tm *TableManager) refreshTableStructure(ctx context.Context, db dbh, tableName string) error {
-	rows, err := db.Query(ctx, refreshTableStructureStatement, tm.Schema, tableName)
+func (tm *TableManager) table(name string) *tableState {
+	tm.tablesMutex.Lock()
+	tbl := tm.tables[name]
+	if tbl == nil {
+		tbl = &tableState{name: name}
+		tm.tables[name] = tbl
+	}
+	tm.tablesMutex.Unlock()
+	return tbl
+}
+
+func (tm *TableManager) refreshTableStructure(ctx context.Context, db dbh, tbl *tableState) error {
+	rows, err := db.Query(ctx, refreshTableStructureStatement, tm.Schema, tbl.name)
 	if err != nil {
 		return err
 	}
@@ -89,9 +125,7 @@ func (tm *TableManager) refreshTableStructure(ctx context.Context, db dbh, table
 	}
 
 	if len(cols) > 0 {
-		tm.tablesMutex.Lock()
-		tm.Tables[tableName] = cols
-		tm.tablesMutex.Unlock()
+		tbl.SetColumns(cols)
 	}
 
 	return nil
@@ -102,44 +136,46 @@ func (tm *TableManager) refreshTableStructure(ctx context.Context, db dbh, table
 // createTemplates and addColumnTemplates are the templates which are executed in the event of table create or alter
 // (respectively).
 // metricsTableName and tagsTableName are passed to the templates.
+//
+// If the table cannot be modified, the returned column list is the columns which are missing from the table.
 func (tm *TableManager) EnsureStructure(
 	ctx context.Context,
 	db dbh,
-	tableName string,
+	tbl *tableState,
 	columns []utils.Column,
 	createTemplates []*template.Template,
 	addColumnsTemplates []*template.Template,
-	metricsTableName string,
-	tagsTableName string,
+	metricsTable *tableState,
+	tagsTable *tableState,
 ) ([]utils.Column, error) {
 	// Sort so that:
 	//   * When we create/alter the table the columns are in a sane order (telegraf gives us the fields in random order)
 	//   * When we display errors about missing columns, the order is also sane, and consistent
 	utils.ColumnList(columns).Sort()
 
-	tm.tablesMutex.RLock()
-	dbColumns, ok := tm.Tables[tableName]
-	tm.tablesMutex.RUnlock()
-	if !ok {
+	tbl.Lock()
+	tblColumns := tbl.Columns()
+	if tblColumns == nil {
 		// We don't know about the table. First try to query it.
-		if err := tm.refreshTableStructure(ctx, db, tableName); err != nil {
+		if err := tm.refreshTableStructure(ctx, db, tbl); err != nil {
+			tbl.Unlock()
 			return nil, fmt.Errorf("querying table structure: %w", err)
 		}
-		tm.tablesMutex.RLock()
-		dbColumns, ok = tm.Tables[tableName]
-		tm.tablesMutex.RUnlock()
-		if !ok {
+		tblColumns = tbl.Columns()
+
+		if tblColumns == nil {
 			// Ok, table doesn't exist, now we can create it.
-			if err := tm.executeTemplates(ctx, db, createTemplates, tableName, columns, metricsTableName, tagsTableName); err != nil {
+			if err := tm.executeTemplates(ctx, db, createTemplates, tbl, columns, metricsTable, tagsTable); err != nil {
+				tbl.Unlock()
 				return nil, fmt.Errorf("creating table: %w", err)
 			}
-			tm.tablesMutex.RLock()
-			dbColumns = tm.Tables[tableName]
-			tm.tablesMutex.RUnlock()
+
+			tblColumns = tbl.Columns()
 		}
 	}
+	tbl.Unlock()
 
-	missingColumns, err := tm.checkColumns(dbColumns, columns)
+	missingColumns, err := tm.checkColumns(tblColumns, columns)
 	if err != nil {
 		return nil, fmt.Errorf("column validation: %w", err)
 	}
@@ -151,10 +187,21 @@ func (tm *TableManager) EnsureStructure(
 		return missingColumns, nil
 	}
 
-	if err := tm.executeTemplates(ctx, db, addColumnsTemplates, tableName, missingColumns, metricsTableName, tagsTableName); err != nil {
+	tbl.Lock()
+	// Check again in case someone else got it while table was unlocked.
+	tblColumns = tbl.Columns()
+	missingColumns, _ = tm.checkColumns(tblColumns, columns)
+	if len(missingColumns) == 0 {
+		tbl.Unlock()
+		return nil, nil
+	}
+
+	if err := tm.executeTemplates(ctx, db, addColumnsTemplates, tbl, missingColumns, metricsTable, tagsTable); err != nil {
+		tbl.Unlock()
 		return nil, fmt.Errorf("adding columns: %w", err)
 	}
-	return tm.checkColumns(tm.Tables[tableName], columns)
+	tbl.Unlock()
+	return tm.checkColumns(tbl.Columns(), columns)
 }
 
 func (tm *TableManager) checkColumns(dbColumns map[string]utils.Column, srcColumns []utils.Column) ([]utils.Column, error) {
@@ -176,14 +223,19 @@ func (tm *TableManager) executeTemplates(
 	ctx context.Context,
 	db dbh,
 	tmpls []*template.Template,
-	tableName string,
+	tbl *tableState,
 	newColumns []utils.Column,
-	metricsTableName string,
-	tagsTableName string,
+	metricsTable *tableState,
+	tagsTable *tableState,
 ) error {
-	tmplTable := template.NewTable(tm.Schema, tableName, colMapToSlice(tm.Tables[tableName]))
-	metricsTmplTable := template.NewTable(tm.Schema, metricsTableName, colMapToSlice(tm.Tables[metricsTableName]))
-	tagsTmplTable := template.NewTable(tm.Schema, tagsTableName, colMapToSlice(tm.Tables[tagsTableName]))
+	tmplTable := template.NewTable(tm.Schema, tbl.name, colMapToSlice(tbl.Columns()))
+	metricsTmplTable := template.NewTable(tm.Schema, metricsTable.name, colMapToSlice(metricsTable.Columns()))
+	var tagsTmplTable *template.Table
+	if tagsTable != nil {
+		tagsTmplTable = template.NewTable(tm.Schema, tagsTable.name, colMapToSlice(tagsTable.Columns()))
+	} else {
+		tagsTmplTable = template.NewTable("", "", nil)
+	}
 
 	/* https://github.com/jackc/pgx/issues/872
 	stmts := make([]string, len(tmpls))
@@ -214,6 +266,10 @@ func (tm *TableManager) executeTemplates(
 	}
 	tm.refreshTableStructureResponse(tableName, rows)
 	*/
+
+	// Lock to prevent concurrency issues in postgres (pg_type_typname_nsp_index unique constraint; SQLSTATE 23505)
+	tm.schemaMutex.Lock()
+	defer tm.schemaMutex.Unlock()
 
 	tx, err := db.Begin(ctx)
 	if err != nil {
@@ -248,7 +304,7 @@ func (tm *TableManager) executeTemplates(
 		return err
 	}
 
-	return tm.refreshTableStructure(ctx, db, tableName)
+	return tm.refreshTableStructure(ctx, db, tbl)
 }
 
 func colMapToSlice(colMap map[string]utils.Column) []utils.Column {
@@ -263,24 +319,25 @@ func colMapToSlice(colMap map[string]utils.Column) []utils.Column {
 }
 
 // MatchSource scans through the metrics, determining what columns are needed for inserting, and ensuring the DB schema matches.
+//
 // If the schema does not match, and schema updates are disabled:
-//   If a field missing from the DB, the field is omitted.
-//   If a tag is missing from the DB, the metric is dropped.
+// If a field missing from the DB, the field is omitted.
+// If a tag is missing from the DB, the metric is dropped.
 func (tm *TableManager) MatchSource(ctx context.Context, db dbh, rowSource *TableSource) error {
-	metricTableName := rowSource.Name()
-	var tagTableName string
+	metricTable := tm.table(rowSource.Name())
+	var tagTable *tableState
 	if tm.TagsAsForeignKeys {
-		tagTableName = metricTableName + tm.TagTableSuffix
+		tagTable = tm.table(metricTable.name + tm.TagTableSuffix)
 
 		missingCols, err := tm.EnsureStructure(
 			ctx,
 			db,
-			tagTableName,
+			tagTable,
 			rowSource.TagTableColumns(),
 			tm.TagTableCreateTemplates,
 			tm.TagTableAddColumnTemplates,
-			metricTableName,
-			tagTableName,
+			metricTable,
+			tagTable,
 		)
 		if err != nil {
 			return err
@@ -292,19 +349,19 @@ func (tm *TableManager) MatchSource(ctx context.Context, db dbh, rowSource *Tabl
 				rowSource.DropColumn(col)
 				colDefs[i] = col.Name + " " + string(col.Type)
 			}
-			tm.Logger.Errorf("table '%s' is missing tag columns (dropping metrics): %s", tagTableName, strings.Join(colDefs, ", "))
+			tm.Logger.Errorf("table '%s' is missing tag columns (dropping metrics): %s", tagTable.name, strings.Join(colDefs, ", "))
 		}
 	}
 
 	missingCols, err := tm.EnsureStructure(
 		ctx,
 		db,
-		metricTableName,
+		metricTable,
 		rowSource.MetricTableColumns(),
 		tm.CreateTemplates,
 		tm.AddColumnTemplates,
-		metricTableName,
-		tagTableName,
+		metricTable,
+		tagTable,
 	)
 	if err != nil {
 		return err
@@ -316,7 +373,7 @@ func (tm *TableManager) MatchSource(ctx context.Context, db dbh, rowSource *Tabl
 			rowSource.DropColumn(col)
 			colDefs[i] = col.Name + " " + string(col.Type)
 		}
-		tm.Logger.Errorf("table '%s' is missing columns (dropping fields): %s", metricTableName, strings.Join(colDefs, ", "))
+		tm.Logger.Errorf("table '%s' is missing columns (dropping fields): %s", metricTable.name, strings.Join(colDefs, ", "))
 	}
 
 	return nil

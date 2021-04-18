@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -42,13 +41,13 @@ func (l Log) String() string {
 type LogAccumulator struct {
 	logs []Log
 	cond *sync.Cond
-	t    *testing.T
+	tb   testing.TB
 }
 
-func NewLogAccumulator(t *testing.T) *LogAccumulator {
+func NewLogAccumulator(tb testing.TB) *LogAccumulator {
 	return &LogAccumulator{
 		cond: sync.NewCond(&sync.Mutex{}),
-		t:    t,
+		tb:   tb,
 	}
 }
 
@@ -57,8 +56,8 @@ func (la *LogAccumulator) append(level pgx.LogLevel, format string, args []inter
 	log := Log{level, format, args}
 	la.logs = append(la.logs, log)
 	s := log.String()
-	la.t.Helper()
-	la.t.Log(s)
+	la.tb.Helper()
+	la.tb.Log(s)
 	la.cond.Broadcast()
 	la.cond.L.Unlock()
 }
@@ -177,42 +176,42 @@ func (la *LogAccumulator) Logs() []Log {
 }
 
 func (la *LogAccumulator) Errorf(format string, args ...interface{}) {
-	la.t.Helper()
+	la.tb.Helper()
 	la.append(pgx.LogLevelError, format, args)
 }
 
 func (la *LogAccumulator) Error(args ...interface{}) {
-	la.t.Helper()
+	la.tb.Helper()
 	la.append(pgx.LogLevelError, "%v", args)
 }
 
 func (la *LogAccumulator) Debugf(format string, args ...interface{}) {
-	la.t.Helper()
+	la.tb.Helper()
 	la.append(pgx.LogLevelDebug, format, args)
 }
 
 func (la *LogAccumulator) Debug(args ...interface{}) {
-	la.t.Helper()
+	la.tb.Helper()
 	la.append(pgx.LogLevelDebug, "%v", args)
 }
 
 func (la *LogAccumulator) Warnf(format string, args ...interface{}) {
-	la.t.Helper()
+	la.tb.Helper()
 	la.append(pgx.LogLevelWarn, format, args)
 }
 
 func (la *LogAccumulator) Warn(args ...interface{}) {
-	la.t.Helper()
+	la.tb.Helper()
 	la.append(pgx.LogLevelWarn, "%v", args)
 }
 
 func (la *LogAccumulator) Infof(format string, args ...interface{}) {
-	la.t.Helper()
+	la.tb.Helper()
 	la.append(pgx.LogLevelInfo, format, args)
 }
 
 func (la *LogAccumulator) Info(args ...interface{}) {
-	la.t.Helper()
+	la.tb.Helper()
 	la.append(pgx.LogLevelInfo, "%v", args)
 }
 
@@ -252,9 +251,9 @@ type PostgresqlTest struct {
 	Logger *LogAccumulator
 }
 
-func newPostgresqlTest(t *testing.T) *PostgresqlTest {
+func newPostgresqlTest(tb testing.TB) *PostgresqlTest {
 	p := newPostgresql()
-	logger := NewLogAccumulator(t)
+	logger := NewLogAccumulator(tb)
 	p.Logger = logger
 	pt := &PostgresqlTest{Postgresql: *p}
 	pt.Logger = logger
@@ -280,19 +279,19 @@ func TestDBConnectedHook(t *testing.T) {
 	p := newPostgresqlTest(t)
 	require.NoError(t, p.Connect())
 
-	_, err := p.db.Exec(ctx, "SELECT 1")
-	require.NoError(t, err)
-	tmTables := p.tableManager.Tables
+	metrics := []telegraf.Metric{
+		newMetric(t, "", MSS{}, MSI{"v": 1}),
+	}
+	require.NoError(t, p.Write(metrics))
 
 	c, _ := p.db.Acquire(ctx)
 	c.Conn().Close(ctx)
 	c.Release()
 
-	_, err = p.db.Exec(ctx, "SELECT 1")
+	_, err := p.db.Exec(ctx, "SELECT 1")
 	require.NoError(t, err)
-	tmTables2 := p.tableManager.Tables
 
-	assert.NotEqual(t, reflect.ValueOf(tmTables).Pointer(), reflect.ValueOf(tmTables2).Pointer())
+	assert.Empty(t, p.tableManager.table(t.Name()).Columns())
 }
 
 func newMetric(

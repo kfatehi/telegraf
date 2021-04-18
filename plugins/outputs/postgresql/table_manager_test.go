@@ -20,18 +20,18 @@ func TestTableManager_EnsureStructure(t *testing.T) {
 	missingCols, err := p.tableManager.EnsureStructure(
 		ctx,
 		p.db,
-		t.Name(),
+		p.tableManager.table(t.Name()),
 		cols,
 		p.CreateTemplates,
 		p.AddColumnTemplates,
-		t.Name(),
-		"",
+		p.tableManager.table(t.Name()),
+		nil,
 		)
 	require.NoError(t, err)
 	require.Empty(t, missingCols)
 
-	assert.EqualValues(t, cols[0], p.tableManager.Tables[t.Name()]["foo"])
-	assert.EqualValues(t, cols[1], p.tableManager.Tables[t.Name()]["baz"])
+	assert.EqualValues(t, cols[0], p.tableManager.table(t.Name()).Columns()["foo"])
+	assert.EqualValues(t, cols[1], p.tableManager.table(t.Name()).Columns()["baz"])
 }
 
 func TestTableManager_refreshTableStructure(t *testing.T) {
@@ -45,22 +45,22 @@ func TestTableManager_refreshTableStructure(t *testing.T) {
 	_, err := p.tableManager.EnsureStructure(
 		ctx,
 		p.db,
-		t.Name(),
+		p.tableManager.table(t.Name()),
 		cols,
 		p.CreateTemplates,
 		p.AddColumnTemplates,
-		t.Name(),
-		"",
+		p.tableManager.table(t.Name()),
+		nil,
 	)
 	require.NoError(t, err)
 
 	p.tableManager.ClearTableCache()
-	require.Empty(t, p.tableManager.Tables)
+	require.Empty(t, p.tableManager.table(t.Name()).Columns())
 
-	require.NoError(t, p.tableManager.refreshTableStructure(ctx, p.db, t.Name()))
+	require.NoError(t, p.tableManager.refreshTableStructure(ctx, p.db, p.tableManager.table(t.Name())))
 
-	assert.EqualValues(t, cols[0], p.tableManager.Tables[t.Name()]["foo"])
-	assert.EqualValues(t, cols[1], p.tableManager.Tables[t.Name()]["baz"])
+	assert.EqualValues(t, cols[0], p.tableManager.table(t.Name()).Columns()["foo"])
+	assert.EqualValues(t, cols[1], p.tableManager.table(t.Name()).Columns()["baz"])
 }
 
 func TestTableManager_MatchSource(t *testing.T) {
@@ -74,8 +74,8 @@ func TestTableManager_MatchSource(t *testing.T) {
 	tsrc := NewTableSources(&p.Postgresql, metrics)[t.Name()]
 
 	require.NoError(t, p.tableManager.MatchSource(ctx, p.db, tsrc))
-	assert.Contains(t, p.tableManager.Tables[t.Name() + p.TagTableSuffix], "tag")
-	assert.Contains(t, p.tableManager.Tables[t.Name()], "a")
+	assert.Contains(t, p.tableManager.table(t.Name() + p.TagTableSuffix).Columns(), "tag")
+	assert.Contains(t, p.tableManager.table(t.Name()).Columns(), "a")
 }
 
 // verify that TableManager updates & caches the DB table structure unless the incoming metric can't fit.
