@@ -2,6 +2,7 @@ package postgresql
 
 import (
 	"encoding/json"
+	"github.com/coocood/freecache"
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/plugins/outputs/postgresql/utils"
 	"github.com/jackc/pgx/v4"
@@ -65,6 +66,7 @@ func TestTableSource_tagJSONB(t *testing.T) {
 func TestTableSource_tagTable(t *testing.T) {
 	p := newPostgresqlTest(t)
 	p.TagsAsForeignKeys = true
+	p.tagsCache = freecache.NewCache(5*1024*1024)
 
 	metrics := []telegraf.Metric{
 		newMetric(t, "", MSS{"a": "one", "b": "two"}, MSI{"v": 1}),
@@ -84,6 +86,7 @@ func TestTableSource_tagTableJSONB(t *testing.T) {
 	p := newPostgresqlTest(t)
 	p.TagsAsForeignKeys = true
 	p.TagsAsJsonb = true
+	p.tagsCache = freecache.NewCache(5*1024*1024)
 
 	metrics := []telegraf.Metric{
 		newMetric(t, "", MSS{"a": "one", "b": "two"}, MSI{"v": 1}),
@@ -146,6 +149,7 @@ func TestTableSource_DropColumn_tag_fkTrue_fcTrue(t *testing.T) {
 	p := newPostgresqlTest(t)
 	p.TagsAsForeignKeys = true
 	p.ForignTagConstraint = true
+	p.tagsCache = freecache.NewCache(5*1024*1024)
 
 	metrics := []telegraf.Metric{
 		newMetric(t, "", MSS{"a": "one", "b": "two"}, MSI{"v": 1}),
@@ -179,6 +183,7 @@ func TestTableSource_DropColumn_tag_fkTrue_fcFalse(t *testing.T) {
 	p := newPostgresqlTest(t)
 	p.TagsAsForeignKeys = true
 	p.ForignTagConstraint = false
+	p.tagsCache = freecache.NewCache(5*1024*1024)
 
 	metrics := []telegraf.Metric{
 		newMetric(t, "", MSS{"a": "one", "b": "two"}, MSI{"v": 1}),

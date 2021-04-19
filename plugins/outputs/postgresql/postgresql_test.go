@@ -346,6 +346,17 @@ func TestWrite_sequential(t *testing.T) {
 	if assert.Len(t, dumpB, 1) {
 		assert.EqualValues(t, 2, dumpB[0]["v"])
 	}
+
+	p.Logger.Clear()
+	require.NoError(t, p.Write(metrics))
+
+	stmtCount := 0
+	for _, log := range p.Logger.Logs() {
+		if strings.Contains(log.String(), "info: PG ") {
+			stmtCount += 1
+		}
+	}
+	assert.Equal(t, 4, stmtCount) // BEGIN, COPY table _a, COPY table _b, COMMIT
 }
 
 func TestWrite_concurrent(t *testing.T) {
@@ -582,6 +593,17 @@ func TestWriteTagTable(t *testing.T) {
 	require.Len(t, dumpTags, 1)
 	assert.EqualValues(t, dump[0]["tag_id"], dumpTags[0]["tag_id"])
 	assert.EqualValues(t, "foo", dumpTags[0]["tag"])
+
+	p.Logger.Clear()
+	require.NoError(t, p.Write(metrics))
+
+	stmtCount := 0
+	for _, log := range p.Logger.Logs() {
+		if strings.Contains(log.String(), "info: PG ") {
+			stmtCount += 1
+		}
+	}
+	assert.Equal(t, 3, stmtCount) // BEGIN, COPY metrics table, COMMIT
 }
 
 // Verify that when using TagsAsForeignKeys and a tag can't be written, that we still add the metrics.
@@ -627,7 +649,7 @@ func TestWrite_tagError_foreignConstraint(t *testing.T) {
 	require.NoError(t, err)
 
 	metrics = []telegraf.Metric{
-		newMetric(t, "", MSS{"tag":"foo"}, MSI{"v": 2}),
+		newMetric(t, "", MSS{"tag":"bar"}, MSI{"v": 2}),
 	}
 	assert.NoError(t, p.Write(metrics))
 	haveError := false

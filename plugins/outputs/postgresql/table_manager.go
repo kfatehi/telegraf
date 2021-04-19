@@ -65,6 +65,10 @@ func (tm *TableManager) ClearTableCache() {
 		tbl.SetColumns(nil)
 	}
 	tm.tablesMutex.Unlock()
+
+	if tm.tagsCache != nil {
+		tm.tagsCache.Clear()
+	}
 }
 
 func (tm *TableManager) table(name string) *tableState {

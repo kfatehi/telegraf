@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/coocood/freecache"
 	"strings"
 	"time"
 
@@ -47,8 +48,9 @@ type Postgresql struct {
 	dbContextCancel func()
 	db              *pgxpool.Pool
 	tableManager    *TableManager
+	tagsCache       *freecache.Cache
 
-	writeChan chan *TableSource
+	writeChan      chan *TableSource
 	writeWaitGroup *utils.WaitGroup
 
 	Logger telegraf.Logger
@@ -121,6 +123,10 @@ func (p *Postgresql) Connect() error {
 		return err
 	}
 	p.tableManager = NewTableManager(p)
+
+	if p.TagsAsForeignKeys {
+		p.tagsCache = freecache.NewCache(5*1024*1024) // 5MB
+	}
 
 	maxConns := int(p.db.Stat().MaxConns())
 	if maxConns > 1 {
@@ -345,7 +351,18 @@ func isTempError(err error) bool {
 func (p *Postgresql) writeRetry(ctx context.Context, tableSource *TableSource) error {
 	backoff := time.Duration(0)
 	for {
-		err := p.writeMetricsFromMeasure(ctx, p.db, tableSource)
+		tx, err := p.db.Begin(ctx)
+		if err != nil {
+			return err
+		}
+
+		err = p.writeMetricsFromMeasure(ctx, tx, tableSource)
+		if err == nil {
+			tx.Commit(ctx)
+			return nil
+		}
+
+		tx.Rollback(ctx)
 		if !isTempError(err) {
 			return err
 		}
@@ -371,14 +388,8 @@ func (p *Postgresql) writeMetricsFromMeasure(ctx context.Context, db dbh, tableS
 		return err
 	}
 
-	tx, err := db.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-
 	if p.TagsAsForeignKeys {
-		if err := p.WriteTagTable(ctx, tx, tableSource); err != nil {
+		if err := p.WriteTagTable(ctx, db, tableSource); err != nil {
 			if p.ForignTagConstraint {
 				return fmt.Errorf("writing to tag table '%s': %s", tableSource.Name()+p.TagTableSuffix, err)
 			} else {
@@ -390,17 +401,21 @@ func (p *Postgresql) writeMetricsFromMeasure(ctx context.Context, db dbh, tableS
 	}
 
 	fullTableName := utils.FullTableName(p.Schema, tableSource.Name())
-	if _, err := tx.CopyFrom(ctx, fullTableName, tableSource.ColumnNames(), tableSource); err != nil {
+	if _, err := db.CopyFrom(ctx, fullTableName, tableSource.ColumnNames(), tableSource); err != nil {
 		return err
 	}
 
-	tx.Commit(ctx)
 	return nil
 }
 
 func (p *Postgresql) WriteTagTable(ctx context.Context, db dbh, tableSource *TableSource) error {
-	//TODO cache which tagSets we've already inserted and skip them.
 	ttsrc := NewTagTableSource(tableSource)
+
+	// Check whether we have any tags to insert
+	if !ttsrc.Next() {
+		return nil
+	}
+	ttsrc.Reset()
 
 	// need a transaction so that if it errors, we don't roll back the parent transaction, just the tags
 	tx, err := db.Begin(ctx)
@@ -424,5 +439,10 @@ func (p *Postgresql) WriteTagTable(ctx context.Context, db dbh, tableSource *Tab
 		return fmt.Errorf("inserting into tags table: %w", err)
 	}
 
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+
+	ttsrc.UpdateCache()
+	return nil
 }

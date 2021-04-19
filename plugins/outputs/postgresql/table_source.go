@@ -358,13 +358,17 @@ func (ttsrc *TagTableSource) Next() bool {
 	for {
 		if ttsrc.cursor+1 >= len(ttsrc.tagIDs) {
 			ttsrc.cursorValues = nil
-			ttsrc.cursorError = nil
 			return false
 		}
 		ttsrc.cursor += 1
 
-		ttsrc.cursorValues, ttsrc.cursorError = ttsrc.values()
-		if ttsrc.cursorValues != nil || ttsrc.cursorError != nil {
+		if _, err := ttsrc.postgresql.tagsCache.GetInt(ttsrc.tagIDs[ttsrc.cursor]); err == nil {
+			// tag ID already inserted
+			continue
+		}
+
+		ttsrc.cursorValues = ttsrc.values()
+		if ttsrc.cursorValues != nil {
 			return true
 		}
 	}
@@ -374,7 +378,7 @@ func (ttsrc *TagTableSource) Reset() {
 	ttsrc.cursor = -1
 }
 
-func (ttsrc *TagTableSource) values() ([]interface{}, error) {
+func (ttsrc *TagTableSource) values() ([]interface{}) {
 	tagID := ttsrc.tagIDs[ttsrc.cursor]
 	tagSet := ttsrc.tagSets[tagID]
 
@@ -390,11 +394,17 @@ func (ttsrc *TagTableSource) values() ([]interface{}, error) {
 	}
 	values[0] = tagID
 
-	return values, nil
+	return values
 }
 
 func (ttsrc *TagTableSource) Values() ([]interface{}, error) {
 	return ttsrc.cursorValues, ttsrc.cursorError
+}
+
+func (ttsrc *TagTableSource) UpdateCache() {
+	for _, tagID := range ttsrc.tagIDs {
+		ttsrc.postgresql.tagsCache.SetInt(tagID, nil, 0)
+	}
 }
 
 func (ttsrc *TagTableSource) Err() error {
