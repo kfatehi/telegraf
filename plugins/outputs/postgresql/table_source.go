@@ -6,6 +6,40 @@ import (
 	"github.com/influxdata/telegraf/plugins/outputs/postgresql/utils"
 )
 
+type columnList struct {
+	columns []utils.Column
+	indices map[string]int
+}
+func newColumnList() *columnList {
+	return &columnList{
+		indices: map[string]int{},
+	}
+}
+
+func (cl *columnList) Add(column utils.Column) bool {
+	if _, ok := cl.indices[column.Name]; ok {
+		return false
+	}
+	cl.columns = append(cl.columns, column)
+	cl.indices[column.Name] = len(cl.columns) - 1
+	return true
+}
+
+func (cl *columnList) Remove(name string) bool {
+	idx, ok := cl.indices[name]
+	if !ok {
+		return false
+	}
+	cl.columns = append(cl.columns[:idx], cl.columns[idx+1:]...)
+	delete(cl.indices, name)
+
+	for idx, col := range cl.columns[idx:] {
+		cl.indices[col.Name] = idx
+	}
+
+	return true
+}
+
 // TableSource satisfies pgx.CopyFromSource
 type TableSource struct {
 	postgresql   *Postgresql
@@ -14,19 +48,13 @@ type TableSource struct {
 	cursorValues []interface{}
 	cursorError  error
 
-	// tagPositions is the position of each tag within the tag set, regardless of whether tags are foreign keys or not.
-	tagPositions map[string]int
-	// tagColumns is the list of tags to emit. List is in order.
-	tagColumns []utils.Column
+	tagColumns *columnList
 	// tagSets is the list of tag IDs to tag values in use within the TableSource. The position of each value in the list
 	// corresponds to the key name in the tagColumns list.
 	// This data is used to build out the foreign tag table when enabled.
 	tagSets map[int64][]*telegraf.Tag
 
-	// fieldPositions is the position of each field within the field list.
-	fieldPositions map[string]int
-	// fieldColumns is the list of fields to emit. List is in order.
-	fieldColumns []utils.Column
+	fieldColumns *columnList
 
 	droppedTagColumns []string
 }
@@ -53,10 +81,10 @@ func NewTableSource(postgresql *Postgresql) *TableSource {
 		tagSets:    make(map[int64][]*telegraf.Tag),
 	}
 	if !postgresql.TagsAsJsonb {
-		tsrc.tagPositions = map[string]int{}
+		tsrc.tagColumns = newColumnList()
 	}
 	if !postgresql.FieldsAsJsonb {
-		tsrc.fieldPositions = map[string]int{}
+		tsrc.fieldColumns = newColumnList()
 	}
 	return tsrc
 }
@@ -71,19 +99,13 @@ func (tsrc *TableSource) AddMetric(metric telegraf.Metric) {
 
 	if !tsrc.postgresql.TagsAsJsonb {
 		for _, t := range metric.TagList() {
-			if _, ok := tsrc.tagPositions[t.Key]; !ok {
-				tsrc.tagPositions[t.Key] = len(tsrc.tagPositions)
-				tsrc.tagColumns = append(tsrc.tagColumns, ColumnFromTag(t.Key, t.Value))
-			}
+			tsrc.tagColumns.Add(ColumnFromTag(t.Key, t.Value))
 		}
 	}
 
 	if !tsrc.postgresql.FieldsAsJsonb {
 		for _, f := range metric.FieldList() {
-			if _, ok := tsrc.fieldPositions[f.Key]; !ok {
-				tsrc.fieldPositions[f.Key] = len(tsrc.fieldPositions)
-				tsrc.fieldColumns = append(tsrc.fieldColumns, ColumnFromField(f.Key, f.Value))
-			}
+			tsrc.fieldColumns.Add(ColumnFromField(f.Key, f.Value))
 		}
 	}
 
@@ -104,7 +126,7 @@ func (tsrc *TableSource) TagColumns() []utils.Column {
 	if tsrc.postgresql.TagsAsJsonb {
 		cols = append(cols, TagsJSONColumn)
 	} else {
-		cols = append(cols, tsrc.tagColumns...)
+		cols = append(cols, tsrc.tagColumns.columns...)
 	}
 
 	return cols
@@ -112,7 +134,7 @@ func (tsrc *TableSource) TagColumns() []utils.Column {
 
 // Returns the superset of all fields of all metrics.
 func (tsrc *TableSource) FieldColumns() []utils.Column {
-	return tsrc.fieldColumns
+	return tsrc.fieldColumns.columns
 }
 
 // Returns the full column list, including time, tag id or tags, and fields.
@@ -176,19 +198,9 @@ func (tsrc *TableSource) dropTagColumn(col utils.Column) {
 	}
 	tsrc.droppedTagColumns = append(tsrc.droppedTagColumns, col.Name)
 
-	pos, ok := tsrc.tagPositions[col.Name]
-	if !ok {
+	if !tsrc.tagColumns.Remove(col.Name) {
 		return
 	}
-
-	delete(tsrc.tagPositions, col.Name)
-	for n, p := range tsrc.tagPositions {
-		if p > pos {
-			tsrc.tagPositions[n] -= 1
-		}
-	}
-
-	tsrc.tagColumns = append(tsrc.tagColumns[:pos], tsrc.tagColumns[pos+1:]...)
 
 	for setID, set := range tsrc.tagSets {
 		for _, tag := range set {
@@ -207,19 +219,7 @@ func (tsrc *TableSource) dropFieldColumn(col utils.Column) {
 		panic(fmt.Sprintf("Tried to perform an invalid field drop. This should not have happened. measurement=%s field=%s", tsrc.Name(), col.Name))
 	}
 
-	pos, ok := tsrc.fieldPositions[col.Name]
-	if !ok {
-		return
-	}
-
-	delete(tsrc.fieldPositions, col.Name)
-	for n, p := range tsrc.fieldPositions {
-		if p > pos {
-			tsrc.fieldPositions[n] -= 1
-		}
-	}
-
-	tsrc.fieldColumns = append(tsrc.fieldColumns[:pos], tsrc.fieldColumns[pos+1:]...)
+	tsrc.fieldColumns.Remove(col.Name)
 }
 
 func (tsrc *TableSource) Next() bool {
@@ -246,19 +246,17 @@ func (tsrc *TableSource) Reset() {
 // If the metric cannot be emitted, such as due to dropped tags, or all fields dropped, the return value is nil.
 func (tsrc *TableSource) values() ([]interface{}, error) {
 	metric := tsrc.metrics[tsrc.cursor]
-	tags := metric.TagList()
-	fields := metric.FieldList()
 
-	values := []interface{}{}
-
-	values = append(values, metric.Time())
+	values := []interface{}{
+		metric.Time(),
+	}
 
 	if !tsrc.postgresql.TagsAsForeignKeys {
 		if !tsrc.postgresql.TagsAsJsonb {
 			// tags_as_foreignkey=false, tags_as_json=false
-			tagValues := make([]interface{}, len(tsrc.tagPositions))
-			for _, tag := range tags {
-				tagPos, ok := tsrc.tagPositions[tag.Key]
+			tagValues := make([]interface{}, len(tsrc.tagColumns.columns))
+			for _, tag := range metric.TagList() {
+				tagPos, ok := tsrc.tagColumns.indices[tag.Key]
 				if !ok {
 					// tag has been dropped, we can't emit or we risk collision with another metric
 					return nil, nil
@@ -284,11 +282,11 @@ func (tsrc *TableSource) values() ([]interface{}, error) {
 
 	if !tsrc.postgresql.FieldsAsJsonb {
 		// fields_as_json=false
-		fieldValues := make([]interface{}, len(tsrc.fieldPositions))
+		fieldValues := make([]interface{}, len(tsrc.fieldColumns.columns))
 		fieldsEmpty := true
-		for _, field := range fields {
+		for _, field := range metric.FieldList() {
 			// we might have dropped the field due to the table missing the column & schema updates being turned off
-			if fPos, ok := tsrc.fieldPositions[field.Key]; ok {
+			if fPos, ok := tsrc.fieldColumns.indices[field.Key]; ok {
 				fieldValues[fPos] = field.Value
 				fieldsEmpty = false
 			}
@@ -378,7 +376,7 @@ func (ttsrc *TagTableSource) Reset() {
 	ttsrc.cursor = -1
 }
 
-func (ttsrc *TagTableSource) values() ([]interface{}) {
+func (ttsrc *TagTableSource) values() []interface{} {
 	tagID := ttsrc.tagIDs[ttsrc.cursor]
 	tagSet := ttsrc.tagSets[tagID]
 
@@ -386,7 +384,7 @@ func (ttsrc *TagTableSource) values() ([]interface{}) {
 	if !ttsrc.postgresql.TagsAsJsonb {
 		values = make([]interface{}, len(tagSet)+1)
 		for _, tag := range tagSet {
-			values[ttsrc.TableSource.tagPositions[tag.Key]+1] = tag.Value // +1 to account for tag_id column
+			values[ttsrc.TableSource.tagColumns.indices[tag.Key]+1] = tag.Value // +1 to account for tag_id column
 		}
 	} else {
 		values = make([]interface{}, 2)
