@@ -275,25 +275,6 @@ func TestPostgresqlConnect(t *testing.T) {
 	p.Close()
 }
 
-func TestDBConnectedHook(t *testing.T) {
-	p := newPostgresqlTest(t)
-	require.NoError(t, p.Connect())
-
-	metrics := []telegraf.Metric{
-		newMetric(t, "", MSS{}, MSI{"v": 1}),
-	}
-	require.NoError(t, p.Write(metrics))
-
-	c, _ := p.db.Acquire(ctx)
-	c.Conn().Close(ctx)
-	c.Release()
-
-	_, err := p.db.Exec(ctx, "SELECT 1")
-	require.NoError(t, err)
-
-	assert.Empty(t, p.tableManager.table(t.Name()).Columns())
-}
-
 func newMetric(
 	t *testing.T,
 	suffix string,

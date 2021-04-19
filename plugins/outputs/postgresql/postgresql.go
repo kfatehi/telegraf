@@ -105,7 +105,6 @@ func (p *Postgresql) Connect() error {
 		// The pgx default for pool_max_conns is 4. However we want to default to 1.
 		poolConfig.MaxConns = 1
 	}
-	poolConfig.AfterConnect = p.dbConnectedHook
 
 	if p.LogLevel != "" {
 		poolConfig.ConnConfig.Logger = pgxLogger{p.Logger}
@@ -137,25 +136,6 @@ func (p *Postgresql) Connect() error {
 			go p.writeWorker(p.dbContext)
 		}
 	}
-
-	return nil
-}
-
-// dbConnectHook checks to see whether we lost all connections, and if so resets any known state of the database (e.g. cached tables).
-// This is so that we handle failovers, where the new database might not have the same state as the previous.
-func (p *Postgresql) dbConnectedHook(ctx context.Context, conn *pgx.Conn) error {
-	if p.db == nil || p.tableManager == nil {
-		// This will happen on the initial connect since we haven't set it yet.
-		// Also meaning there is no state to reset.
-		return nil
-	}
-
-	stat := p.db.Stat()
-	if stat.AcquiredConns()+stat.IdleConns() > 0 {
-		return nil
-	}
-
-	p.tableManager.ClearTableCache()
 
 	return nil
 }
