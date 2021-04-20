@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
@@ -117,6 +118,26 @@ func PgTypeCanContain(canThis PgDataType, containThis PgDataType) bool {
 		return containThis == PgTimestampWithoutTimeZone
 	default:
 		return false
+	}
+}
+
+// pgxLogger makes telegraf.Logger compatible with pgx.Logger
+type PGXLogger struct {
+	telegraf.Logger
+}
+
+func (l PGXLogger) Log(_ context.Context, level pgx.LogLevel, msg string, data map[string]interface{}) {
+	switch level {
+	case pgx.LogLevelError:
+		l.Errorf("PG %s - %+v", msg, data)
+	case pgx.LogLevelWarn:
+		l.Warnf("PG %s - %+v", msg, data)
+	case pgx.LogLevelInfo, pgx.LogLevelNone:
+		l.Infof("PG %s - %+v", msg, data)
+	case pgx.LogLevelDebug, pgx.LogLevelTrace:
+		l.Debugf("PG %s - %+v", msg, data)
+	default:
+		l.Debugf("PG %s - %+v", msg, data)
 	}
 }
 

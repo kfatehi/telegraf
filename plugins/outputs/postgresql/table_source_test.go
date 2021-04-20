@@ -148,7 +148,7 @@ func TestTableSource_DropColumn_tag(t *testing.T) {
 func TestTableSource_DropColumn_tag_fkTrue_fcTrue(t *testing.T) {
 	p := newPostgresqlTest(t)
 	p.TagsAsForeignKeys = true
-	p.ForignTagConstraint = true
+	p.ForeignTagConstraint = true
 	p.tagsCache = freecache.NewCache(5*1024*1024)
 
 	metrics := []telegraf.Metric{
@@ -182,7 +182,7 @@ func TestTableSource_DropColumn_tag_fkTrue_fcTrue(t *testing.T) {
 func TestTableSource_DropColumn_tag_fkTrue_fcFalse(t *testing.T) {
 	p := newPostgresqlTest(t)
 	p.TagsAsForeignKeys = true
-	p.ForignTagConstraint = false
+	p.ForeignTagConstraint = false
 	p.tagsCache = freecache.NewCache(5*1024*1024)
 
 	metrics := []telegraf.Metric{

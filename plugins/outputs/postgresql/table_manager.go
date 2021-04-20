@@ -3,11 +3,11 @@ package postgresql
 import (
 	"context"
 	"fmt"
-	"github.com/influxdata/telegraf/plugins/outputs/postgresql/template"
 	"strings"
 	"sync"
 	"sync/atomic"
 
+	"github.com/influxdata/telegraf/plugins/outputs/postgresql/template"
 	"github.com/influxdata/telegraf/plugins/outputs/postgresql/utils"
 )
 
@@ -350,7 +350,9 @@ func (tm *TableManager) MatchSource(ctx context.Context, db dbh, rowSource *Tabl
 		if len(missingCols) > 0 {
 			colDefs := make([]string, len(missingCols))
 			for i, col := range missingCols {
-				rowSource.DropColumn(col)
+				if err := rowSource.DropColumn(col); err != nil {
+					return fmt.Errorf("metric/table mismatch: Unable to omit field/column from \"%s\": %w", tagTable.name, err)
+				}
 				colDefs[i] = col.Name + " " + string(col.Type)
 			}
 			tm.Logger.Errorf("table '%s' is missing tag columns (dropping metrics): %s", tagTable.name, strings.Join(colDefs, ", "))
@@ -374,10 +376,12 @@ func (tm *TableManager) MatchSource(ctx context.Context, db dbh, rowSource *Tabl
 	if len(missingCols) > 0 {
 		colDefs := make([]string, len(missingCols))
 		for i, col := range missingCols {
-			rowSource.DropColumn(col)
+			if err := rowSource.DropColumn(col); err != nil {
+				return fmt.Errorf("metric/table mismatch: Unable to omit field/column from \"%s\": %w", metricTable.name, err)
+			}
 			colDefs[i] = col.Name + " " + string(col.Type)
 		}
-		tm.Logger.Errorf("table '%s' is missing columns (dropping fields): %s", metricTable.name, strings.Join(colDefs, ", "))
+		tm.Logger.Errorf("table \"%s\" is missing columns (omitting fields): %s", metricTable.name, strings.Join(colDefs, ", "))
 	}
 
 	return nil

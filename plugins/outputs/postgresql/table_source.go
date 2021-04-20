@@ -2,6 +2,7 @@ package postgresql
 
 import (
 	"fmt"
+
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/plugins/outputs/postgresql/utils"
 )
@@ -180,15 +181,18 @@ func (tsrc *TableSource) ColumnNames() []string {
 // Drops the specified column.
 // If column is a tag column, any metrics containing the tag will be skipped.
 // If column is a field column, any metrics containing the field will have it omitted.
-func (tsrc *TableSource) DropColumn(col utils.Column) {
+func (tsrc *TableSource) DropColumn(col utils.Column) error {
 	switch col.Role {
 	case utils.TagColType:
 		tsrc.dropTagColumn(col)
 	case utils.FieldColType:
 		tsrc.dropFieldColumn(col)
+	case utils.TimeColType, utils.TagsIDColType:
+		return fmt.Errorf("critical column \"%s\"", col.Name)
 	default:
-		panic(fmt.Sprintf("Tried to perform an invalid column drop. This should not have happened. measurement=%s name=%s role=%v", tsrc.Name(), col.Name, col.Role))
+		return fmt.Errorf("internal error: unknown column \"%s\"", col.Name)
 	}
+	return nil
 }
 
 // Drops the tag column from conversion. Any metrics containing this tag will be skipped.
@@ -271,7 +275,7 @@ func (tsrc *TableSource) values() ([]interface{}, error) {
 	} else {
 		// tags_as_foreignkey=true
 		tagID := utils.GetTagID(metric)
-		if tsrc.postgresql.ForignTagConstraint {
+		if tsrc.postgresql.ForeignTagConstraint {
 			if _, ok := tsrc.tagSets[tagID]; !ok {
 				// tag has been dropped
 				return nil, nil

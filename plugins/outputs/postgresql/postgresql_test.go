@@ -617,7 +617,7 @@ func TestWrite_tagError(t *testing.T) {
 func TestWrite_tagError_foreignConstraint(t *testing.T) {
 	p := newPostgresqlTest(t)
 	p.TagsAsForeignKeys = true
-	p.ForignTagConstraint = true
+	p.ForeignTagConstraint = true
 	require.NoError(t, p.Connect())
 
 	metrics := []telegraf.Metric{

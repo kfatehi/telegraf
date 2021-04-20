@@ -4,22 +4,21 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/coocood/freecache"
 	"strings"
 	"time"
 
+	"github.com/coocood/freecache"
 	"github.com/jackc/pgconn"
-
-	"github.com/influxdata/telegraf/config"
-	"github.com/influxdata/telegraf/models"
-	"github.com/influxdata/telegraf/plugins/outputs/postgresql/template"
-
 	"github.com/jackc/pgx/v4"
 	"github.com/jackc/pgx/v4/pgxpool"
 
 	"github.com/influxdata/telegraf"
+	"github.com/influxdata/telegraf/config"
+	"github.com/influxdata/telegraf/models"
 	"github.com/influxdata/telegraf/plugins/outputs"
+	"github.com/influxdata/telegraf/plugins/outputs/postgresql/template"
 	"github.com/influxdata/telegraf/plugins/outputs/postgresql/utils"
+	"github.com/influxdata/toml"
 )
 
 type dbh interface {
@@ -27,135 +26,6 @@ type dbh interface {
 	CopyFrom(ctx context.Context, tableName pgx.Identifier, columnNames []string, rowSrc pgx.CopyFromSource) (int64, error)
 	Exec(ctx context.Context, sql string, arguments ...interface{}) (commandTag pgconn.CommandTag, err error)
 	Query(ctx context.Context, sql string, args ...interface{}) (pgx.Rows, error)
-}
-
-type Postgresql struct {
-	Connection                 string
-	Schema                     string
-	TagsAsForeignKeys          bool
-	TagsAsJsonb                bool
-	FieldsAsJsonb              bool
-	CreateTemplates            []*template.Template
-	AddColumnTemplates         []*template.Template
-	TagTableCreateTemplates    []*template.Template
-	TagTableAddColumnTemplates []*template.Template
-	TagTableSuffix             string
-	RetryMaxBackoff            config.Duration
-	ForignTagConstraint        bool
-	LogLevel                   string
-
-	dbContext       context.Context
-	dbContextCancel func()
-	db              *pgxpool.Pool
-	tableManager    *TableManager
-	tagsCache       *freecache.Cache
-
-	writeChan      chan *TableSource
-	writeWaitGroup *utils.WaitGroup
-
-	Logger telegraf.Logger
-}
-
-func init() {
-	outputs.Add("postgresql", func() telegraf.Output { return newPostgresql() })
-}
-
-func newPostgresql() *Postgresql {
-	return &Postgresql{
-		Schema:                     "public",
-		CreateTemplates:            []*template.Template{template.TableCreateTemplate},
-		AddColumnTemplates:         []*template.Template{template.TableAddColumnTemplate},
-		TagTableCreateTemplates:    []*template.Template{template.TagTableCreateTemplate},
-		TagTableAddColumnTemplates: []*template.Template{template.TableAddColumnTemplate},
-		TagTableSuffix:             "_tag",
-		RetryMaxBackoff:            config.Duration(time.Second * 15),
-		ForignTagConstraint:        false,
-		Logger:                     models.NewLogger("outputs", "postgresql", ""),
-	}
-}
-
-// pgxLogger makes telegraf.Logger compatible with pgx.Logger
-type pgxLogger struct {
-	telegraf.Logger
-}
-
-func (l pgxLogger) Log(ctx context.Context, level pgx.LogLevel, msg string, data map[string]interface{}) {
-	switch level {
-	case pgx.LogLevelError:
-		l.Errorf("PG %s - %+v", msg, data)
-	case pgx.LogLevelWarn:
-		l.Warnf("PG %s - %+v", msg, data)
-	case pgx.LogLevelInfo, pgx.LogLevelNone:
-		l.Infof("PG %s - %+v", msg, data)
-	case pgx.LogLevelDebug, pgx.LogLevelTrace:
-		l.Debugf("PG %s - %+v", msg, data)
-	default:
-		l.Debugf("PG %s - %+v", msg, data)
-	}
-}
-
-// Connect establishes a connection to the target database and prepares the cache
-func (p *Postgresql) Connect() error {
-	poolConfig, err := pgxpool.ParseConfig(p.Connection)
-	if err != nil {
-		return err
-	}
-	parsedConfig, _ := pgx.ParseConfig(p.Connection)
-	if _, ok := parsedConfig.Config.RuntimeParams["pool_max_conns"]; !ok {
-		// The pgx default for pool_max_conns is 4. However we want to default to 1.
-		poolConfig.MaxConns = 1
-	}
-
-	if p.LogLevel != "" {
-		poolConfig.ConnConfig.Logger = pgxLogger{p.Logger}
-		poolConfig.ConnConfig.LogLevel, err = pgx.LogLevelFromString(p.LogLevel)
-		if err != nil {
-			return fmt.Errorf("invalid log level")
-		}
-	}
-
-	// Yes, we're not supposed to store the context. However since we don't receive a context, we have to.
-	p.dbContext, p.dbContextCancel = context.WithCancel(context.Background())
-	p.db, err = pgxpool.ConnectConfig(p.dbContext, poolConfig)
-	if err != nil {
-		p.Logger.Errorf("Couldn't connect to server\n%v", err)
-		return err
-	}
-	p.tableManager = NewTableManager(p)
-
-	if p.TagsAsForeignKeys {
-		p.tagsCache = freecache.NewCache(5*1024*1024) // 5MB
-	}
-
-	maxConns := int(p.db.Stat().MaxConns())
-	if maxConns > 1 {
-		p.writeChan = make(chan *TableSource)
-		p.writeWaitGroup = utils.NewWaitGroup()
-		for i := 0; i < maxConns; i++ {
-			p.writeWaitGroup.Add(1)
-			go p.writeWorker(p.dbContext)
-		}
-	}
-
-	return nil
-}
-
-// Close closes the connection to the database
-func (p *Postgresql) Close() error {
-	if p.writeChan != nil {
-		// We're using async mode. Gracefully close with timeout.
-		close(p.writeChan)
-		select {
-		case <-p.writeWaitGroup.C():
-		case <-time.NewTimer(time.Second * 5).C:
-		}
-	}
-
-	// Die!
-	p.dbContextCancel()
-	p.db.Close()
-	p.tableManager = nil
-	return nil
 }
 
 var sampleConfig = `
@@ -181,38 +51,164 @@ var sampleConfig = `
   ## connection with the server and doesn't restrict the databases we are trying
   ## to grab metrics for.
   ##
-  connection = "host=localhost user=postgres sslmode=verify-full"
+  #connection = "host=localhost user=postgres sslmode=verify-full"
+
+  ## Postgres schema to use.
+  schema = "public"
 
   ## Store tags as foreign keys in the metrics table. Default is false.
-  # tags_as_foreignkeys = false
+  tags_as_foreign_keys = false
 
-  ## Schema to create the tables into
-  # schema = "public"
+  ## Suffix to append to table name (measurement name) for the foreign tag table.
+  tag_table_suffix = "_tag"
 
-  ## Use jsonb datatype for tags
-  # tags_as_jsonb = false
+  ## Deny inserting metrics if the foreign tag can't be inserted.
+  foreign_tag_constraint = false
 
-  ## Use jsonb datatype for fields
-  # fields_as_jsonb = false
+  ## Store all tags as a JSONB object in a single 'tags' column.
+  tags_as_jsonb = false
+
+  ## Store all fields as a JSONB object in a single 'fields' column.
+  fields_as_jsonb = false
 
   ## Templated statements to execute when creating a new table.
-  create_templates = ['CREATE TABLE {{.table}} ({{.columns}})']
+  create_templates = [
+    '''CREATE TABLE {{.table}} ({{.columns}})''',
+  ]
 
   ## Templated statements to execute when adding columns to a table.
   ## Set to an empty list to disable. Points containing tags for which there is no column will be skipped. Points
   ## containing fields for which there is no column will have the field omitted.
-  add_column_templates = ['ALTER TABLE {{.table}} ADD COLUMN IF NOT EXISTS {{.columns|join ", ADD COLUMN IF NOT EXISTS "}}']
+  add_column_templates = [
+    '''ALTER TABLE {{.table}} ADD COLUMN IF NOT EXISTS {{.columns|join ", ADD COLUMN IF NOT EXISTS "}}''',
+  ]
 
   ## Templated statements to execute when creating a new tag table.
-  tag_table_create_templates = ['CREATE TABLE {{.table}} ({{.columns}}, PRIMARY KEY (tag_id))']
+  tag_table_create_templates = [
+    '''CREATE TABLE {{.table}} ({{.columns}}, PRIMARY KEY (tag_id))''',
+  ]
 
   ## Templated statements to execute when adding columns to a tag table.
   ## Set to an empty list to disable. Points containing tags for which there is no column will be skipped.
-  tag_table_add_column_templates = ['ALTER TABLE {{.table}} ADD COLUMN IF NOT EXISTS {{.columns|join ", ADD COLUMN IF NOT EXISTS "}}']
+  tag_table_add_column_templates = [
+    '''ALTER TABLE {{.table}} ADD COLUMN IF NOT EXISTS {{.columns|join ", ADD COLUMN IF NOT EXISTS "}}''',
+  ]
+
+  ## When using pool_max_conns>1, an a temporary error occurs, the query is retried with an incremental backoff. This
+  ## controls the maximum backoff duration.
+  retry_max_backoff = "15s"
+
+  ## Enable & set the log level for the Postgres driver.
+  # log_level = "info" # trace, debug, info, warn, error, none
 `
+
+type Postgresql struct {
+	Connection                 string
+	Schema                     string
+	TagsAsForeignKeys          bool
+	TagTableSuffix             string
+	ForeignTagConstraint       bool
+	TagsAsJsonb                bool
+	FieldsAsJsonb              bool
+	CreateTemplates            []*template.Template
+	AddColumnTemplates         []*template.Template
+	TagTableCreateTemplates    []*template.Template
+	TagTableAddColumnTemplates []*template.Template
+	RetryMaxBackoff            config.Duration
+	LogLevel                   string
+
+	dbContext       context.Context
+	dbContextCancel func()
+	db              *pgxpool.Pool
+	tableManager    *TableManager
+	tagsCache       *freecache.Cache
+
+	writeChan      chan *TableSource
+	writeWaitGroup *utils.WaitGroup
+
+	Logger telegraf.Logger
+}
+
+func init() {
+	outputs.Add("postgresql", func() telegraf.Output { return newPostgresql() })
+}
+
+func newPostgresql() *Postgresql {
+	p := &Postgresql{
+		Logger: models.NewLogger("outputs", "postgresql", ""),
+	}
+	if err := toml.Unmarshal([]byte(p.SampleConfig()), p); err != nil {
+		panic(err.Error())
+	}
+	return p
+}
 
 func (p *Postgresql) SampleConfig() string { return sampleConfig }
 func (p *Postgresql) Description() string  { return "Send metrics to PostgreSQL" }
+
+// Connect establishes a connection to the target database and prepares the cache
+func (p *Postgresql) Connect() error {
+	poolConfig, err := pgxpool.ParseConfig(p.Connection)
+	if err != nil {
+		return err
+	}
+	parsedConfig, _ := pgx.ParseConfig(p.Connection)
+	if _, ok := parsedConfig.Config.RuntimeParams["pool_max_conns"]; !ok {
+		// The pgx default for pool_max_conns is 4. However we want to default to 1.
+		poolConfig.MaxConns = 1
+	}
+
+	if p.LogLevel != "" {
+		poolConfig.ConnConfig.Logger = utils.PGXLogger{p.Logger}
+		poolConfig.ConnConfig.LogLevel, err = pgx.LogLevelFromString(p.LogLevel)
+		if err != nil {
+			return fmt.Errorf("invalid log level")
+		}
+	}
+
+	// Yes, we're not supposed to store the context. However since we don't receive a context, we have to.
+	p.dbContext, p.dbContextCancel = context.WithCancel(context.Background())
+	p.db, err = pgxpool.ConnectConfig(p.dbContext, poolConfig)
+	if err != nil {
+		p.Logger.Errorf("Couldn't connect to server\n%v", err)
+		return err
+	}
+	p.tableManager = NewTableManager(p)
+
+	if p.TagsAsForeignKeys {
+		p.tagsCache = freecache.NewCache(5 * 1024 * 1024) // 5MB
+	}
+
+	maxConns := int(p.db.Stat().MaxConns())
+	if maxConns > 1 {
+		p.writeChan = make(chan *TableSource)
+		p.writeWaitGroup = utils.NewWaitGroup()
+		for i := 0; i < maxConns; i++ {
+			p.writeWaitGroup.Add(1)
+			go p.writeWorker(p.dbContext)
+		}
+	}
+
+	return nil
+}
+
+// Close closes the connection(s) to the database.
+func (p *Postgresql) Close() error {
+	if p.writeChan != nil {
+		// We're using async mode. Gracefully close with timeout.
+		close(p.writeChan)
+		select {
+		case <-p.writeWaitGroup.C():
+		case <-time.NewTimer(time.Second * 5).C:
+		}
+	}
+
+	// Die!
+	p.dbContextCancel()
+	p.db.Close()
+	p.tableManager = nil
+	return nil
+}
 
 func (p *Postgresql) Write(metrics []telegraf.Metric) error {
 	tableSources := NewTableSources(p, metrics)
@@ -370,7 +366,7 @@ func (p *Postgresql) writeMetricsFromMeasure(ctx context.Context, db dbh, tableS
 
 	if p.TagsAsForeignKeys {
 		if err := p.WriteTagTable(ctx, db, tableSource); err != nil {
-			if p.ForignTagConstraint {
+			if p.ForeignTagConstraint {
 				return fmt.Errorf("writing to tag table '%s': %s", tableSource.Name()+p.TagTableSuffix, err)
 			} else {
 				// log and continue. As the admin can correct the issue, and tags don't change over time, they can be
