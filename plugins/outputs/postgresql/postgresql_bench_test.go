@@ -66,7 +66,7 @@ func batchGenerator(ctx context.Context, b *testing.B, batchSize int, numTables 
 
 				tags := tagSets[rand.Intn(len(tagSets))]
 
-				m, _ := metric.New(tableName, tags, nil, time.Now())
+				m := metric.New(tableName, tags, nil, time.Now())
 				m.AddTag("tableName", tableName) // ensure the tag set is unique to this table. Just in case...
 
 				// We do field cardinality by randomizing the name of the final field to an integer < cardinality.

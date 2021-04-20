@@ -42,7 +42,7 @@ require (
 	github.com/caio/go-tdigest v3.1.0+incompatible
 	github.com/cisco-ie/nx-telemetry-proto v0.0.0-20190531143454-82441e232cf6
 	github.com/containerd/containerd v1.4.1 // indirect
-	github.com/coocood/freecache v1.1.1 // indirect
+	github.com/coocood/freecache v1.1.1
 	github.com/couchbase/go-couchbase v0.0.0-20180501122049-16db1f1fe037
 	github.com/couchbase/gomemcached v0.0.0-20180502221210-0da75df14530 // indirect
 	github.com/couchbase/goutils v0.0.0-20180530154633-e865a1461c8a // indirect
@@ -82,9 +82,10 @@ require (
 	github.com/influxdata/toml v0.0.0-20190415235208-270119a8ce65
 	github.com/influxdata/wlog v0.0.0-20160411224016-7c63b0a71ef8
 	github.com/jackc/fake v0.0.0-20150926172116-812a484cc733 // indirect
-	github.com/jackc/pgconn v1.7.2
+	github.com/jackc/pgconn v1.8.1
+	github.com/jackc/pgproto3/v2 v2.0.7 // indirect
 	github.com/jackc/pgx v3.6.2+incompatible
-	github.com/jackc/pgx/v4 v4.9.2
+	github.com/jackc/pgx/v4 v4.11.0
 	github.com/james4k/rcon v0.0.0-20120923215419-8fbb8268b60a
 	github.com/jmespath/go-jmespath v0.4.0
 	github.com/kardianos/service v1.0.0
@@ -132,11 +133,12 @@ require (
 	github.com/yuin/gopher-lua v0.0.0-20180630135845-46796da1b0b4 // indirect
 	go.starlark.net v0.0.0-20210406145628-7a1108eaa012
 	go.uber.org/multierr v1.6.0 // indirect
-	golang.org/x/net v0.0.0-20201209123823-ac852fbbde11
+	golang.org/x/crypto v0.0.0-20210415154028-4f45737414dc // indirect
+	golang.org/x/net v0.0.0-20210226172049-e18ecbb05110
 	golang.org/x/oauth2 v0.0.0-20200107190931-bf48bf16ab8d
 	golang.org/x/sync v0.0.0-20201020160332-67f06af15bc9
 	golang.org/x/sys v0.0.0-20201119102817-f84b799fce68
-	golang.org/x/text v0.3.4
+	golang.org/x/text v0.3.6
 	golang.zx2c4.com/wireguard/wgctrl v0.0.0-20200205215550-e35592f146e4
 	google.golang.org/api v0.29.0
 	google.golang.org/genproto v0.0.0-20200815001618-f69a88009b70
