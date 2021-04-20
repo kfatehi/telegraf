@@ -135,40 +135,6 @@ func (la *LogAccumulator) Clear() {
 	la.cond.L.Unlock()
 }
 
-//func (la *LogAccumulator) Chan() <-chan Log {
-//	ch := make(chan Log)
-//	rch := (<-chan Log)(ch)
-//	go func() {
-//		cond := la.cond
-//		logs := &la.logs
-//		runtime.SetFinalizer(rch, func(_ <-chan string) {
-//			cond.L.Lock()
-//			logs = nil
-//			cond.Broadcast()
-//			cond.L.Unlock()
-//		})
-//		la = nil
-//		i := 0
-//		cond.L.Lock()
-//		for {
-//			if logs == nil {
-//				break
-//			}
-//			if i == len(*logs) {
-//				cond.Wait()
-//				continue
-//			}
-//			log := (*logs)[i]
-//			i++
-//			cond.L.Unlock()
-//			ch <- log
-//			cond.L.Lock()
-//		}
-//		cond.L.Unlock()
-//	}()
-//	return rch
-//}
-
 func (la *LogAccumulator) Logs() []Log {
 	la.cond.L.Lock()
 	defer la.cond.L.Unlock()
@@ -215,17 +181,26 @@ func (la *LogAccumulator) Info(args ...interface{}) {
 	la.append(pgx.LogLevelInfo, "%v", args)
 }
 
-var ctx context.Context
+var ctx = context.Background()
 
 func TestMain(m *testing.M) {
-	if os.Getenv("PGHOST") == "" && os.Getenv("PGHOSTADDR") == "" && os.Getenv("PGPORT") == "" {
-		// User has not specified a server, use the default, which is the one defined by docker-compose.yml at the top of the repo.
+	// Try and find the server.
+	// Try provided env vars & defaults first.
+	if c, err := pgx.Connect(ctx, ""); err != nil {
 		os.Setenv("PGHOST", "127.0.0.1")
-		os.Setenv("PGPORT", "5433")
 		os.Setenv("PGUSER", "postgres")
+		// Try the port used in docker-compose.yml first
+		os.Setenv("PGPORT", "5433")
+		if c, err := pgx.Connect(ctx, ""); err != nil {
+			// Fall back to the default port
+			os.Setenv("PGPORT", "5432")
+		} else {
+			c.Close(ctx)
+		}
+	} else {
+		c.Close(ctx)
 	}
 
-	ctx = context.Background()
 	if err := prepareDatabase("telegraf"); err != nil {
 		fmt.Fprintf(os.Stderr, "Error preparing database: %s\n", err)
 		os.Exit(1)

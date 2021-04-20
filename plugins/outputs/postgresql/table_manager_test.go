@@ -78,6 +78,33 @@ func TestTableManager_MatchSource(t *testing.T) {
 	assert.Contains(t, p.tableManager.table(t.Name()).Columns(), "a")
 }
 
+func TestTableManager_noCreateTable(t *testing.T) {
+	p := newPostgresqlTest(t)
+	p.CreateTemplates = nil
+	require.NoError(t, p.Connect())
+
+	metrics := []telegraf.Metric{
+		newMetric(t, "", MSS{"tag": "foo"}, MSI{"a": 1}),
+	}
+	tsrc := NewTableSources(&p.Postgresql, metrics)[t.Name()]
+
+	require.Error(t, p.tableManager.MatchSource(ctx, p.db, tsrc))
+}
+
+func TestTableManager_noCreateTagTable(t *testing.T) {
+	p := newPostgresqlTest(t)
+	p.TagTableCreateTemplates = nil
+	p.TagsAsForeignKeys = true
+	require.NoError(t, p.Connect())
+
+	metrics := []telegraf.Metric{
+		newMetric(t, "", MSS{"tag": "foo"}, MSI{"a": 1}),
+	}
+	tsrc := NewTableSources(&p.Postgresql, metrics)[t.Name()]
+
+	require.Error(t, p.tableManager.MatchSource(ctx, p.db, tsrc))
+}
+
 // verify that TableManager updates & caches the DB table structure unless the incoming metric can't fit.
 func TestTableManager_cache(t *testing.T) {
 	p := newPostgresqlTest(t)
@@ -93,7 +120,7 @@ func TestTableManager_cache(t *testing.T) {
 }
 
 // Verify that when alter statements are disabled and a metric comes in with a new tag key, that the tag is omitted.
-func TestTableSource_noAlterMissingTag(t *testing.T) {
+func TestTableManager_noAlterMissingTag(t *testing.T) {
 	p := newPostgresqlTest(t)
 	p.AddColumnTemplates = []*template.Template{}
 	require.NoError(t, p.Connect())
@@ -115,7 +142,7 @@ func TestTableSource_noAlterMissingTag(t *testing.T) {
 
 // Verify that when alter statements are disabled with foreign tags and a metric comes in with a new tag key, that the
 // field is omitted.
-func TestTableSource_noAlterMissingTagTableTag(t *testing.T) {
+func TestTableManager_noAlterMissingTagTableTag(t *testing.T) {
 	p := newPostgresqlTest(t)
 	p.TagsAsForeignKeys = true
 	p.TagTableAddColumnTemplates = []*template.Template{}
@@ -138,7 +165,7 @@ func TestTableSource_noAlterMissingTagTableTag(t *testing.T) {
 }
 
 // verify that when alter statements are disabled and a metric comes in with a new field key, that the field is omitted.
-func TestTableSource_noAlterMissingField(t *testing.T) {
+func TestTableManager_noAlterMissingField(t *testing.T) {
 	p := newPostgresqlTest(t)
 	p.AddColumnTemplates = []*template.Template{}
 	require.NoError(t, p.Connect())
