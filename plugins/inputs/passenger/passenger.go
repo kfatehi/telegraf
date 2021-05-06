@@ -161,6 +161,7 @@ func (p *passenger) Gather(acc telegraf.Accumulator) error {
 }
 
 func importMetric(stat []byte, acc telegraf.Accumulator) error {
+  var TotalSessions = 0
 	var p info
 
 	decoder := xml.NewDecoder(bytes.NewReader(stat))
@@ -172,13 +173,6 @@ func importMetric(stat []byte, acc telegraf.Accumulator) error {
 	tags := map[string]string{
 		"passenger_version": p.PassengerVersion,
 	}
-	fields := map[string]interface{}{
-		"process_count":      p.ProcessCount,
-		"max":                p.Max,
-		"capacity_used":      p.CapacityUsed,
-		"get_wait_list_size": p.GetWaitListSize,
-	}
-	acc.AddFields("passenger", fields, tags)
 
 	for _, sg := range p.Supergroups.Supergroup {
 		tags := map[string]string{
@@ -204,6 +198,7 @@ func importMetric(stat []byte, acc telegraf.Accumulator) error {
 			acc.AddFields("passenger_group", fields, tags)
 
 			for _, process := range group.Processes.Process {
+        TotalSessions += process.Sessions
 				tags := map[string]string{
 					"group_name":       group.Name,
 					"app_root":         group.AppRoot,
@@ -236,6 +231,14 @@ func importMetric(stat []byte, acc telegraf.Accumulator) error {
 			}
 		}
 	}
+	fields := map[string]interface{}{
+		"process_count":      p.ProcessCount,
+		"max":                p.Max,
+		"capacity_used":      p.CapacityUsed,
+		"get_wait_list_size": p.GetWaitListSize,
+    "total_sessions":     TotalSessions,
+	}
+	acc.AddFields("passenger", fields, tags)
 
 	return nil
 }
