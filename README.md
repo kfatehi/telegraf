@@ -1,3 +1,8 @@
+# Purpose of this fork
+
+This fork exists because of the following reasons:
+- https://github.com/influxdata/telegraf/pull/8651 has not yet been merged, but we use it in production and want to stay updated with master and this PR, so I am dealing with merge conflicts and updating this fork's master as such
+- I support an app that uses passenger and did not want to wait for PR/merger upstream for my modifications, those modifications are visible [here](https://github.com/kfatehi/telegraf/commit/cb9edf3e762cfe4e2eb5631e20187f25124b7825) and [here](https://github.com/kfatehi/telegraf/commit/0207a0e95c5fcaa7479cd4dd432d1211913045bf)
 
 # Telegraf
 
