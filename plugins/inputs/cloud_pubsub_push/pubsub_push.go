@@ -5,7 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"sync"
 	"time"
@@ -169,9 +169,13 @@ func (p *PubSubPush) Start(acc telegraf.Accumulator) error {
 	go func() {
 		defer p.wg.Done()
 		if tlsConf != nil {
-			p.server.ListenAndServeTLS("", "")
+			if err := p.server.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+				p.Log.Errorf("listening and serving TLS failed: %v", err)
+			}
 		} else {
-			p.server.ListenAndServe()
+			if err := p.server.ListenAndServe(); err != nil {
+				p.Log.Errorf("listening and serving TLS failed: %v", err)
+			}
 		}
 	}()
 
@@ -181,6 +185,7 @@ func (p *PubSubPush) Start(acc telegraf.Accumulator) error {
 // Stop cleans up all resources
 func (p *PubSubPush) Stop() {
 	p.cancel()
+	//nolint:errcheck,revive // we cannot do anything if the shutdown fails
 	p.server.Shutdown(p.ctx)
 	p.wg.Wait()
 }
@@ -217,7 +222,7 @@ func (p *PubSubPush) serveWrite(res http.ResponseWriter, req *http.Request) {
 	}
 
 	body := http.MaxBytesReader(res, req.Body, int64(p.MaxBodySize))
-	bytes, err := ioutil.ReadAll(body)
+	bytes, err := io.ReadAll(body)
 	if err != nil {
 		res.WriteHeader(http.StatusRequestEntityTooLarge)
 		return

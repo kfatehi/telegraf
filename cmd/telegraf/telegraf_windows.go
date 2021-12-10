@@ -1,3 +1,4 @@
+//go:build windows
 // +build windows
 
 package main
@@ -44,9 +45,12 @@ func (p *program) run() {
 		p.inputFilters,
 		p.outputFilters,
 	)
+	close(stop)
 }
 func (p *program) Stop(s service.Service) error {
-	close(stop)
+	var empty struct{}
+	stop <- empty // signal reloadLoop to finish (context cancel)
+	<-stop        // wait for reloadLoop to finish and close channel
 	return nil
 }
 
@@ -74,12 +78,17 @@ func runAsWindowsService(inputFilters, outputFilters []string) {
 	// Handle the --service flag here to prevent any issues with tooling that
 	// may not have an interactive session, e.g. installing from Ansible.
 	if *fService != "" {
-		if *fConfig != "" {
-			svcConfig.Arguments = []string{"--config", *fConfig}
+		if len(fConfigs) > 0 {
+			svcConfig.Arguments = []string{}
 		}
-		if *fConfigDirectory != "" {
-			svcConfig.Arguments = append(svcConfig.Arguments, "--config-directory", *fConfigDirectory)
+		for _, fConfig := range fConfigs {
+			svcConfig.Arguments = append(svcConfig.Arguments, "--config", fConfig)
 		}
+
+		for _, fConfigDirectory := range fConfigDirs {
+			svcConfig.Arguments = append(svcConfig.Arguments, "--config-directory", fConfigDirectory)
+		}
+
 		//set servicename to service cmd line, to have a custom name after relaunch as a service
 		svcConfig.Arguments = append(svcConfig.Arguments, "--service-name", *fServiceName)
 

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"net/url"
@@ -24,7 +23,7 @@ var defaultTimeout = 5 * time.Second
 
 var sampleConfig = `
   ## Username for authorization on ClickHouse server
-  ## example: username = "default""
+  ## example: username = "default"
   username = "default"
 
   ## Password for authorization on ClickHouse server
@@ -261,21 +260,34 @@ func (ch *ClickHouse) clusterIncludeExcludeFilter() string {
 }
 
 func (ch *ClickHouse) commonMetrics(acc telegraf.Accumulator, conn *connect, metric string) error {
-	var result []struct {
+	var intResult []struct {
 		Metric string   `json:"metric"`
 		Value  chUInt64 `json:"value"`
 	}
-	if err := ch.execQuery(conn.url, commonMetrics[metric], &result); err != nil {
-		return err
+
+	var floatResult []struct {
+		Metric string  `json:"metric"`
+		Value  float64 `json:"value"`
 	}
 
 	tags := ch.makeDefaultTags(conn)
-
 	fields := make(map[string]interface{})
-	for _, r := range result {
-		fields[internal.SnakeCase(r.Metric)] = uint64(r.Value)
-	}
 
+	if commonMetricsIsFloat[metric] {
+		if err := ch.execQuery(conn.url, commonMetrics[metric], &floatResult); err != nil {
+			return err
+		}
+		for _, r := range floatResult {
+			fields[internal.SnakeCase(r.Metric)] = r.Value
+		}
+	} else {
+		if err := ch.execQuery(conn.url, commonMetrics[metric], &intResult); err != nil {
+			return err
+		}
+		for _, r := range intResult {
+			fields[internal.SnakeCase(r.Metric)] = uint64(r.Value)
+		}
+	}
 	acc.AddFields("clickhouse_"+metric, fields, tags)
 
 	return nil
@@ -560,11 +572,11 @@ func (e *clickhouseError) Error() string {
 	return fmt.Sprintf("received error code %d: %s", e.StatusCode, e.body)
 }
 
-func (ch *ClickHouse) execQuery(url *url.URL, query string, i interface{}) error {
-	q := url.Query()
+func (ch *ClickHouse) execQuery(address *url.URL, query string, i interface{}) error {
+	q := address.Query()
 	q.Set("query", query+" FORMAT JSON")
-	url.RawQuery = q.Encode()
-	req, _ := http.NewRequest("GET", url.String(), nil)
+	address.RawQuery = q.Encode()
+	req, _ := http.NewRequest("GET", address.String(), nil)
 	if ch.Username != "" {
 		req.Header.Add("X-ClickHouse-User", ch.Username)
 	}
@@ -575,9 +587,9 @@ func (ch *ClickHouse) execQuery(url *url.URL, query string, i interface{}) error
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
-		body, _ := ioutil.ReadAll(io.LimitReader(resp.Body, 200))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 200))
 		return &clickhouseError{
 			StatusCode: resp.StatusCode,
 			body:       body,
@@ -593,7 +605,7 @@ func (ch *ClickHouse) execQuery(url *url.URL, query string, i interface{}) error
 		return err
 	}
 
-	if _, err := io.Copy(ioutil.Discard, resp.Body); err != nil {
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
 		return err
 	}
 	return nil
@@ -614,9 +626,9 @@ func (i *chUInt64) UnmarshalJSON(b []byte) error {
 }
 
 const (
-	systemEventsSQL       = "SELECT event AS metric, CAST(value AS UInt64) AS value FROM system.events"
-	systemMetricsSQL      = "SELECT          metric, CAST(value AS UInt64) AS value FROM system.metrics"
-	systemAsyncMetricsSQL = "SELECT          metric, CAST(value AS UInt64) AS value FROM system.asynchronous_metrics"
+	systemEventsSQL       = "SELECT event AS metric, toUInt64(value) AS value FROM system.events"
+	systemMetricsSQL      = "SELECT          metric, toUInt64(value) AS value FROM system.metrics"
+	systemAsyncMetricsSQL = "SELECT          metric, toFloat64(value) AS value FROM system.asynchronous_metrics"
 	systemPartsSQL        = `
 		SELECT
 			database,
@@ -635,24 +647,30 @@ const (
 	systemZookeeperRootNodesSQL = "SELECT count() AS zk_root_nodes FROM system.zookeeper WHERE path='/'"
 
 	systemReplicationExistsSQL   = "SELECT count() AS replication_queue_exists FROM system.tables WHERE database='system' AND name='replication_queue'"
-	systemReplicationNumTriesSQL = "SELECT countIf(num_tries>1) AS replication_num_tries_replicas, countIf(num_tries>100) AS replication_too_many_tries_replicas FROM system.replication_queue"
+	systemReplicationNumTriesSQL = "SELECT countIf(num_tries>1) AS replication_num_tries_replicas, countIf(num_tries>100) AS replication_too_many_tries_replicas FROM system.replication_queue SETTINGS empty_result_for_aggregation_by_empty_set=0"
 
-	systemDetachedPartsSQL = "SELECT count() AS detached_parts FROM system.detached_parts"
+	systemDetachedPartsSQL = "SELECT count() AS detached_parts FROM system.detached_parts SETTINGS empty_result_for_aggregation_by_empty_set=0"
 
 	systemDictionariesSQL = "SELECT origin, status, bytes_allocated FROM system.dictionaries"
 
-	systemMutationSQL  = "SELECT countIf(latest_fail_time>toDateTime('0000-00-00 00:00:00') AND is_done=0) AS failed, countIf(latest_fail_time=toDateTime('0000-00-00 00:00:00') AND is_done=0) AS running, countIf(is_done=1) AS completed FROM system.mutations"
+	systemMutationSQL  = "SELECT countIf(latest_fail_time>toDateTime('0000-00-00 00:00:00') AND is_done=0) AS failed, countIf(latest_fail_time=toDateTime('0000-00-00 00:00:00') AND is_done=0) AS running, countIf(is_done=1) AS completed FROM system.mutations SETTINGS empty_result_for_aggregation_by_empty_set=0"
 	systemDisksSQL     = "SELECT name, path, toUInt64(100*free_space / total_space) AS free_space_percent, toUInt64( 100 * keep_free_space / total_space) AS keep_free_space_percent FROM system.disks"
-	systemProcessesSQL = "SELECT multiIf(positionCaseInsensitive(query,'select')=1,'select',positionCaseInsensitive(query,'insert')=1,'insert','other') AS query_type, quantile\n(0.5)(elapsed) AS p50, quantile(0.9)(elapsed) AS p90, max(elapsed) AS longest_running FROM system.processes GROUP BY query_type"
+	systemProcessesSQL = "SELECT multiIf(positionCaseInsensitive(query,'select')=1,'select',positionCaseInsensitive(query,'insert')=1,'insert','other') AS query_type, quantile\n(0.5)(elapsed) AS p50, quantile(0.9)(elapsed) AS p90, max(elapsed) AS longest_running FROM system.processes GROUP BY query_type SETTINGS empty_result_for_aggregation_by_empty_set=0"
 
 	systemTextLogExistsSQL = "SELECT count() AS text_log_exists FROM system.tables WHERE database='system' AND name='text_log'"
-	systemTextLogSQL       = "SELECT count() AS messages_last_10_min, level FROM system.text_log WHERE level <= 'Notice' AND event_time >= now() - INTERVAL 600 SECOND GROUP BY level"
+	systemTextLogSQL       = "SELECT count() AS messages_last_10_min, level FROM system.text_log WHERE level <= 'Notice' AND event_time >= now() - INTERVAL 600 SECOND GROUP BY level SETTINGS empty_result_for_aggregation_by_empty_set=0"
 )
 
 var commonMetrics = map[string]string{
 	"events":               systemEventsSQL,
 	"metrics":              systemMetricsSQL,
 	"asynchronous_metrics": systemAsyncMetricsSQL,
+}
+
+var commonMetricsIsFloat = map[string]bool{
+	"events":               false,
+	"metrics":              false,
+	"asynchronous_metrics": true,
 }
 
 var _ telegraf.ServiceInput = &ClickHouse{}

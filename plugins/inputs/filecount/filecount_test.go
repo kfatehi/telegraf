@@ -1,3 +1,4 @@
+//go:build !windows
 // +build !windows
 
 // TODO: Windows - should be enabled for Windows when super asterisk is fixed on Windows
@@ -35,7 +36,7 @@ func TestNoFiltersOnChildDir(t *testing.T) {
 
 	tags := map[string]string{"directory": getTestdataDir() + "/subdir"}
 	acc := testutil.Accumulator{}
-	acc.GatherError(fc.Gather)
+	require.NoError(t, acc.GatherError(fc.Gather))
 	require.True(t, acc.HasPoint("filecount", tags, "count", int64(len(matches))))
 	require.True(t, acc.HasPoint("filecount", tags, "size_bytes", int64(600)))
 }
@@ -48,7 +49,7 @@ func TestNoRecursiveButSuperMeta(t *testing.T) {
 
 	tags := map[string]string{"directory": getTestdataDir() + "/subdir"}
 	acc := testutil.Accumulator{}
-	acc.GatherError(fc.Gather)
+	require.NoError(t, acc.GatherError(fc.Gather))
 
 	require.True(t, acc.HasPoint("filecount", tags, "count", int64(len(matches))))
 	require.True(t, acc.HasPoint("filecount", tags, "size_bytes", int64(200)))
@@ -77,7 +78,7 @@ func TestDoubleAndSimpleStar(t *testing.T) {
 	tags := map[string]string{"directory": getTestdataDir() + "/subdir/nested2"}
 
 	acc := testutil.Accumulator{}
-	acc.GatherError(fc.Gather)
+	require.NoError(t, acc.GatherError(fc.Gather))
 
 	require.True(t, acc.HasPoint("filecount", tags, "count", int64(len(matches))))
 	require.True(t, acc.HasPoint("filecount", tags, "size_bytes", int64(400)))
@@ -235,7 +236,7 @@ func getFakeFileSystem(basePath string) fakeFileSystem {
 func fileCountEquals(t *testing.T, fc FileCount, expectedCount int, expectedSize int) {
 	tags := map[string]string{"directory": getTestdataDir()}
 	acc := testutil.Accumulator{}
-	acc.GatherError(fc.Gather)
+	require.NoError(t, acc.GatherError(fc.Gather))
 	require.True(t, acc.HasPoint("filecount", tags, "count", int64(expectedCount)))
 	require.True(t, acc.HasPoint("filecount", tags, "size_bytes", int64(expectedSize)))
 }

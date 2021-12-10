@@ -11,15 +11,16 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/influxdata/telegraf/config"
-	itls "github.com/influxdata/telegraf/plugins/common/tls"
-	"github.com/influxdata/telegraf/testutil"
 	"github.com/influxdata/toml"
 	"github.com/stretchr/testify/require"
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/simulator"
 	"github.com/vmware/govmomi/vim25/mo"
 	"github.com/vmware/govmomi/vim25/types"
+
+	"github.com/influxdata/telegraf/config"
+	itls "github.com/influxdata/telegraf/plugins/common/tls"
+	"github.com/influxdata/telegraf/testutil"
 )
 
 var configHeader = `
@@ -153,6 +154,7 @@ func defaultVSphere() *VSphere {
 		DiscoverConcurrency:     1,
 		CollectConcurrency:      1,
 		Separator:               ".",
+		HistoricalInterval:      config.Duration(time.Second * 300),
 	}
 }
 
@@ -228,6 +230,11 @@ func TestParseConfig(t *testing.T) {
 	tab, err := toml.Parse([]byte(c))
 	require.NoError(t, err)
 	require.NotNil(t, tab)
+}
+
+func TestConfigDurationParsing(t *testing.T) {
+	v := defaultVSphere()
+	require.Equal(t, int32(300), int32(time.Duration(v.HistoricalInterval).Seconds()), "HistoricalInterval.Seconds() with default duration should resolve 300")
 }
 
 func TestMaxQuery(t *testing.T) {
@@ -306,6 +313,7 @@ func TestFinder(t *testing.T) {
 	ctx := context.Background()
 
 	c, err := NewClient(ctx, s.URL, v)
+	require.NoError(t, err)
 
 	f := Finder{c}
 
@@ -422,6 +430,7 @@ func TestFolders(t *testing.T) {
 	v := defaultVSphere()
 
 	c, err := NewClient(ctx, s.URL, v)
+	require.NoError(t, err)
 
 	f := Finder{c}
 
@@ -442,7 +451,7 @@ func TestFolders(t *testing.T) {
 	testLookupVM(ctx, t, &f, "/F0/DC1/vm/**/F*/**", 4, "")
 }
 
-func TestCollection(t *testing.T) {
+func TestCollectionWithClusterMetrics(t *testing.T) {
 	testCollection(t, false)
 }
 

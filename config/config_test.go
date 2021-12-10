@@ -5,9 +5,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/models"
@@ -15,7 +18,6 @@ import (
 	"github.com/influxdata/telegraf/plugins/inputs"
 	"github.com/influxdata/telegraf/plugins/outputs"
 	"github.com/influxdata/telegraf/plugins/parsers"
-	"github.com/stretchr/testify/require"
 )
 
 func TestConfig_LoadSingleInputWithEnvVars(t *testing.T) {
@@ -139,12 +141,17 @@ func TestConfig_LoadDirectory(t *testing.T) {
 	expectedConfigs[0].Tags = make(map[string]string)
 
 	expectedPlugins[1] = inputs.Inputs["exec"]().(*MockupInputPlugin)
-	p, err := parsers.NewParser(&parsers.Config{
+	parserConfig := &parsers.Config{
 		MetricName: "exec",
 		DataFormat: "json",
 		JSONStrict: true,
-	})
+	}
+	p, err := parsers.NewParser(parserConfig)
 	require.NoError(t, err)
+
+	// Inject logger to have proper struct for comparison
+	models.SetLoggerOnPlugin(p, models.NewLogger("parsers", parserConfig.DataFormat, parserConfig.MetricName))
+
 	expectedPlugins[1].SetParser(p)
 	expectedPlugins[1].Command = "/usr/bin/myothercollector --foo=bar"
 	expectedConfigs[1] = &models.InputConfig{
@@ -321,6 +328,35 @@ func TestConfig_URLRetries3FailsThenPasses(t *testing.T) {
 	c := NewConfig()
 	require.NoError(t, c.LoadConfig(ts.URL))
 	require.Equal(t, 4, responseCounter)
+}
+
+func TestConfig_getDefaultConfigPathFromEnvURL(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	c := NewConfig()
+	err := os.Setenv("TELEGRAF_CONFIG_PATH", ts.URL)
+	require.NoError(t, err)
+	configPath, err := getDefaultConfigPath()
+	require.NoError(t, err)
+	require.Equal(t, ts.URL, configPath)
+	err = c.LoadConfig("")
+	require.NoError(t, err)
+}
+
+func TestConfig_URLLikeFileName(t *testing.T) {
+	c := NewConfig()
+	err := c.LoadConfig("http:##www.example.com.conf")
+	require.Error(t, err)
+
+	if runtime.GOOS == "windows" {
+		// The error file not found error message is different on windows
+		require.Equal(t, "Error loading config file http:##www.example.com.conf: open http:##www.example.com.conf: The system cannot find the file specified.", err.Error())
+	} else {
+		require.Equal(t, "Error loading config file http:##www.example.com.conf: open http:##www.example.com.conf: no such file or directory", err.Error())
+	}
 }
 
 /*** Mockup INPUT plugin for testing to avoid cyclic dependencies ***/
