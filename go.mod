@@ -28,7 +28,14 @@ require (
 	github.com/Azure/go-autorest/autorest/validation v0.3.1 // indirect
 	github.com/Azure/go-autorest/logger v0.2.1 // indirect
 	github.com/Azure/go-autorest/tracing v0.6.0 // indirect
+<<<<<<< HEAD
 	github.com/BurntSushi/toml v0.4.1
+=======
+	github.com/BurntSushi/toml v0.3.1
+	github.com/Masterminds/goutils v1.1.0 // indirect
+	github.com/Masterminds/semver v1.5.0 // indirect
+	github.com/Masterminds/sprig v2.22.0+incompatible
+>>>>>>> 7f8a962a122064db5ff41589d35c82a734768f25
 	github.com/Mellanox/rdmamap v0.0.0-20191106181932-7c3c4763a6ee
 	github.com/Microsoft/go-winio v0.4.17 // indirect
 	github.com/Microsoft/hcsshim v0.8.21 // indirect
@@ -78,7 +85,12 @@ require (
 	github.com/cisco-ie/nx-telemetry-proto v0.0.0-20190531143454-82441e232cf6
 	github.com/containerd/cgroups v1.0.1 // indirect
 	github.com/containerd/containerd v1.5.7 // indirect
+<<<<<<< HEAD
 	github.com/coreos/go-semver v0.3.0
+=======
+	github.com/coocood/freecache v1.1.1
+	github.com/coreos/go-semver v0.3.0 // indirect
+>>>>>>> 7f8a962a122064db5ff41589d35c82a734768f25
 	github.com/couchbase/go-couchbase v0.1.0
 	github.com/couchbase/gomemcached v0.1.3 // indirect
 	github.com/couchbase/goutils v0.1.0 // indirect
@@ -145,6 +157,7 @@ require (
 	github.com/hashicorp/go-uuid v1.0.2
 	github.com/hashicorp/golang-lru v0.5.4 // indirect
 	github.com/hashicorp/serf v0.9.5 // indirect
+	github.com/huandu/xstrings v1.3.2 // indirect
 	github.com/influxdata/go-syslog/v3 v3.0.0
 	github.com/influxdata/influxdb-observability/common v0.2.8
 	github.com/influxdata/influxdb-observability/influx2otel v0.2.8
@@ -154,13 +167,13 @@ require (
 	github.com/influxdata/wlog v0.0.0-20160411224016-7c63b0a71ef8
 	github.com/intel/iaevents v1.0.0
 	github.com/jackc/chunkreader/v2 v2.0.1 // indirect
-	github.com/jackc/pgconn v1.5.0 // indirect
-	github.com/jackc/pgio v1.0.0 // indirect
+	github.com/jackc/pgconn v1.8.1
+	github.com/jackc/pgio v1.0.0
 	github.com/jackc/pgpassfile v1.0.0 // indirect
-	github.com/jackc/pgproto3/v2 v2.0.1 // indirect
-	github.com/jackc/pgservicefile v0.0.0-20200307190119-3430c5407db8 // indirect
-	github.com/jackc/pgtype v1.3.0 // indirect
-	github.com/jackc/pgx/v4 v4.6.0
+	github.com/jackc/pgproto3/v2 v2.0.7 // indirect
+	github.com/jackc/pgservicefile v0.0.0-20200714003250-2b9c44734f2b // indirect
+	github.com/jackc/pgtype v1.7.0
+	github.com/jackc/pgx/v4 v4.11.0
 	github.com/jaegertracing/jaeger v1.26.0 // indirect
 	github.com/james4k/rcon v0.0.0-20120923215419-8fbb8268b60a
 	github.com/jcmturner/gofork v1.0.0 // indirect
@@ -185,6 +198,7 @@ require (
 	github.com/microsoft/ApplicationInsights-Go v0.4.4
 	github.com/miekg/dns v1.1.43
 	github.com/minio/highwayhash v1.0.1 // indirect
+	github.com/mitchellh/copystructure v1.2.0 // indirect
 	github.com/mitchellh/go-homedir v1.1.0 // indirect
 	github.com/mitchellh/mapstructure v1.4.1 // indirect
 	github.com/moby/ipvs v1.0.1
@@ -234,8 +248,12 @@ require (
 	github.com/samuel/go-zookeeper v0.0.0-20200724154423-2164a8ac840e // indirect
 	github.com/satori/go.uuid v1.2.1-0.20181028125025-b2ce2384e17b // indirect
 	github.com/sensu/sensu-go/api/core/v2 v2.9.0
+<<<<<<< HEAD
 	github.com/shirou/gopsutil/v3 v3.21.10
 	github.com/shopspring/decimal v0.0.0-20200105231215-408a2507e114 // indirect
+=======
+	github.com/shirou/gopsutil v3.21.8+incompatible
+>>>>>>> 7f8a962a122064db5ff41589d35c82a734768f25
 	github.com/showwin/speedtest-go v1.1.4
 	github.com/signalfx/com_signalfx_metrics_protobuf v0.0.2 // indirect
 	github.com/signalfx/gohistogram v0.0.0-20160107210732-1ccfd2ff5083 // indirect
@@ -337,14 +355,24 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/dynamodbstreams v1.4.0 // indirect
 	github.com/awslabs/kinesis-aggregation/go v0.0.0-20210630091500-54e17340d32f // indirect
 	github.com/cenkalti/backoff/v4 v4.1.1 // indirect
+<<<<<<< HEAD
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/protobuf v1.5.2 // indirect
+=======
+	github.com/cespare/xxhash v1.1.0 // indirect
+	github.com/imdario/mergo v0.3.12 // indirect
+	github.com/jackc/puddle v1.1.3 // indirect
+>>>>>>> 7f8a962a122064db5ff41589d35c82a734768f25
 	github.com/jcmturner/aescts/v2 v2.0.0 // indirect
 	github.com/jcmturner/dnsutils/v2 v2.0.0 // indirect
 	github.com/jcmturner/gokrb5/v8 v8.4.2 // indirect
 	github.com/jcmturner/rpc/v2 v2.0.3 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
+<<<<<<< HEAD
 	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect
+=======
+	github.com/mitchellh/reflectwalk v1.0.2 // indirect
+>>>>>>> 7f8a962a122064db5ff41589d35c82a734768f25
 	github.com/pierrec/lz4/v4 v4.1.8 // indirect
 	go.opentelemetry.io/otel v1.0.1 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlpmetric v0.24.0 // indirect

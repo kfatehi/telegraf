@@ -4,23 +4,23 @@ import "github.com/influxdata/telegraf/plugins/outputs/postgresql/utils"
 
 // Column names and data types for standard fields (time, tag_id, tags, and fields)
 const (
-	TimeColumnName       = "time"
-	TimeColumnDataType   = utils.PgTimestampWithTimeZone
-	TagIDColumnName      = "tag_id"
-	TagIDColumnDataType  = utils.PgBigInt
-	TagsJSONColumnName   = "tags"
-	FieldsJSONColumnName = "fields"
-	JSONColumnDataType   = utils.PgJSONb
+	timeColumnName       = "time"
+	timeColumnDataType   = PgTimestampWithoutTimeZone
+	tagIDColumnName      = "tag_id"
+	tagIDColumnDataType  = PgBigInt
+	tagsJSONColumnName   = "tags"
+	fieldsJSONColumnName = "fields"
+	jsonColumnDataType   = PgJSONb
 )
 
-var TimeColumn = utils.Column{TimeColumnName, TimeColumnDataType, utils.TimeColType}
-var TagIDColumn = utils.Column{TagIDColumnName, TagIDColumnDataType, utils.TagsIDColType}
-var FieldsJSONColumn = utils.Column{FieldsJSONColumnName, JSONColumnDataType, utils.FieldColType}
-var TagsJSONColumn = utils.Column{TagsJSONColumnName, JSONColumnDataType, utils.TagColType}
+var timeColumn = utils.Column{Name: timeColumnName, Type: timeColumnDataType, Role: utils.TimeColType}
+var tagIDColumn = utils.Column{Name: tagIDColumnName, Type: tagIDColumnDataType, Role: utils.TagsIDColType}
+var fieldsJSONColumn = utils.Column{Name: fieldsJSONColumnName, Type: jsonColumnDataType, Role: utils.FieldColType}
+var tagsJSONColumn = utils.Column{Name: tagsJSONColumnName, Type: jsonColumnDataType, Role: utils.TagColType}
 
-func ColumnFromTag(key string, value interface{}) utils.Column {
-	return utils.Column{key, utils.DerivePgDatatype(value), utils.TagColType}
+func (p *Postgresql) columnFromTag(key string, value interface{}) utils.Column {
+	return utils.Column{Name: key, Type: p.derivePgDatatype(value), Role: utils.TagColType}
 }
-func ColumnFromField(key string, value interface{}) utils.Column {
-	return utils.Column{key, utils.DerivePgDatatype(value), utils.FieldColType}
+func (p *Postgresql) columnFromField(key string, value interface{}) utils.Column {
+	return utils.Column{Name: key, Type: p.derivePgDatatype(value), Role: utils.FieldColType}
 }

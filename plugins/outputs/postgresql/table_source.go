@@ -2,6 +2,7 @@ package postgresql
 
 import (
 	"fmt"
+	"hash/fnv"
 
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/plugins/outputs/postgresql/utils"
@@ -11,6 +12,7 @@ type columnList struct {
 	columns []utils.Column
 	indices map[string]int
 }
+
 func newColumnList() *columnList {
 	return &columnList{
 		indices: map[string]int{},
@@ -34,8 +36,8 @@ func (cl *columnList) Remove(name string) bool {
 	cl.columns = append(cl.columns[:idx], cl.columns[idx+1:]...)
 	delete(cl.indices, name)
 
-	for idx, col := range cl.columns[idx:] {
-		cl.indices[col.Name] = idx
+	for i, col := range cl.columns[idx:] {
+		cl.indices[col.Name] = idx + i
 	}
 
 	return true
@@ -48,6 +50,9 @@ type TableSource struct {
 	cursor       int
 	cursorValues []interface{}
 	cursorError  error
+	// tagHashSalt is so that we can use a global tag cache for all tables. The salt is unique per table, and combined
+	// with the tag ID when looked up in the cache.
+	tagHashSalt int64
 
 	tagColumns *columnList
 	// tagSets is the list of tag IDs to tag values in use within the TableSource. The position of each value in the list
@@ -66,7 +71,7 @@ func NewTableSources(p *Postgresql, metrics []telegraf.Metric) map[string]*Table
 	for _, m := range metrics {
 		tsrc := tableSources[m.Name()]
 		if tsrc == nil {
-			tsrc = NewTableSource(p)
+			tsrc = NewTableSource(p, m.Name())
 			tableSources[m.Name()] = tsrc
 		}
 		tsrc.AddMetric(m)
@@ -75,11 +80,15 @@ func NewTableSources(p *Postgresql, metrics []telegraf.Metric) map[string]*Table
 	return tableSources
 }
 
-func NewTableSource(postgresql *Postgresql) *TableSource {
+func NewTableSource(postgresql *Postgresql, name string) *TableSource {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(name))
+
 	tsrc := &TableSource{
-		postgresql: postgresql,
-		cursor:     -1,
-		tagSets:    make(map[int64][]*telegraf.Tag),
+		postgresql:  postgresql,
+		cursor:      -1,
+		tagSets:     make(map[int64][]*telegraf.Tag),
+		tagHashSalt: int64(h.Sum64()),
 	}
 	if !postgresql.TagsAsJsonb {
 		tsrc.tagColumns = newColumnList()
@@ -100,13 +109,13 @@ func (tsrc *TableSource) AddMetric(metric telegraf.Metric) {
 
 	if !tsrc.postgresql.TagsAsJsonb {
 		for _, t := range metric.TagList() {
-			tsrc.tagColumns.Add(ColumnFromTag(t.Key, t.Value))
+			tsrc.tagColumns.Add(tsrc.postgresql.columnFromTag(t.Key, t.Value))
 		}
 	}
 
 	if !tsrc.postgresql.FieldsAsJsonb {
 		for _, f := range metric.FieldList() {
-			tsrc.fieldColumns.Add(ColumnFromField(f.Key, f.Value))
+			tsrc.fieldColumns.Add(tsrc.postgresql.columnFromField(f.Key, f.Value))
 		}
 	}
 
@@ -125,7 +134,7 @@ func (tsrc *TableSource) TagColumns() []utils.Column {
 	var cols []utils.Column
 
 	if tsrc.postgresql.TagsAsJsonb {
-		cols = append(cols, TagsJSONColumn)
+		cols = append(cols, tagsJSONColumn)
 	} else {
 		cols = append(cols, tsrc.tagColumns.columns...)
 	}
@@ -141,17 +150,17 @@ func (tsrc *TableSource) FieldColumns() []utils.Column {
 // Returns the full column list, including time, tag id or tags, and fields.
 func (tsrc *TableSource) MetricTableColumns() []utils.Column {
 	cols := []utils.Column{
-		TimeColumn,
+		timeColumn,
 	}
 
 	if tsrc.postgresql.TagsAsForeignKeys {
-		cols = append(cols, TagIDColumn)
+		cols = append(cols, tagIDColumn)
 	} else {
 		cols = append(cols, tsrc.TagColumns()...)
 	}
 
 	if tsrc.postgresql.FieldsAsJsonb {
-		cols = append(cols, FieldsJSONColumn)
+		cols = append(cols, fieldsJSONColumn)
 	} else {
 		cols = append(cols, tsrc.FieldColumns()...)
 	}
@@ -161,7 +170,7 @@ func (tsrc *TableSource) MetricTableColumns() []utils.Column {
 
 func (tsrc *TableSource) TagTableColumns() []utils.Column {
 	cols := []utils.Column{
-		TagIDColumn,
+		tagIDColumn,
 	}
 
 	cols = append(cols, tsrc.TagColumns()...)
@@ -184,26 +193,25 @@ func (tsrc *TableSource) ColumnNames() []string {
 func (tsrc *TableSource) DropColumn(col utils.Column) error {
 	switch col.Role {
 	case utils.TagColType:
-		tsrc.dropTagColumn(col)
+		return tsrc.dropTagColumn(col)
 	case utils.FieldColType:
-		tsrc.dropFieldColumn(col)
+		return tsrc.dropFieldColumn(col)
 	case utils.TimeColType, utils.TagsIDColType:
 		return fmt.Errorf("critical column \"%s\"", col.Name)
 	default:
 		return fmt.Errorf("internal error: unknown column \"%s\"", col.Name)
 	}
-	return nil
 }
 
 // Drops the tag column from conversion. Any metrics containing this tag will be skipped.
-func (tsrc *TableSource) dropTagColumn(col utils.Column) {
+func (tsrc *TableSource) dropTagColumn(col utils.Column) error {
 	if col.Role != utils.TagColType || tsrc.postgresql.TagsAsJsonb {
-		panic(fmt.Sprintf("Tried to perform an invalid tag drop. This should not have happened. measurement=%s tag=%s", tsrc.Name(), col.Name))
+		return fmt.Errorf("internal error: Tried to perform an invalid tag drop. measurement=%s tag=%s", tsrc.Name(), col.Name)
 	}
 	tsrc.droppedTagColumns = append(tsrc.droppedTagColumns, col.Name)
 
 	if !tsrc.tagColumns.Remove(col.Name) {
-		return
+		return nil
 	}
 
 	for setID, set := range tsrc.tagSets {
@@ -215,15 +223,17 @@ func (tsrc *TableSource) dropTagColumn(col utils.Column) {
 			}
 		}
 	}
+	return nil
 }
 
 // Drops the field column from conversion. Any metrics containing this field will have the field omitted.
-func (tsrc *TableSource) dropFieldColumn(col utils.Column) {
+func (tsrc *TableSource) dropFieldColumn(col utils.Column) error {
 	if col.Role != utils.FieldColType || tsrc.postgresql.FieldsAsJsonb {
-		panic(fmt.Sprintf("Tried to perform an invalid field drop. This should not have happened. measurement=%s field=%s", tsrc.Name(), col.Name))
+		return fmt.Errorf("internal error: Tried to perform an invalid field drop. measurement=%s field=%s", tsrc.Name(), col.Name)
 	}
 
 	tsrc.fieldColumns.Remove(col.Name)
+	return nil
 }
 
 func (tsrc *TableSource) Next() bool {
@@ -233,9 +243,9 @@ func (tsrc *TableSource) Next() bool {
 			tsrc.cursorError = nil
 			return false
 		}
-		tsrc.cursor += 1
+		tsrc.cursor++
 
-		tsrc.cursorValues, tsrc.cursorError = tsrc.values()
+		tsrc.cursorValues, tsrc.cursorError = tsrc.getValues()
 		if tsrc.cursorValues != nil || tsrc.cursorError != nil {
 			return true
 		}
@@ -246,13 +256,13 @@ func (tsrc *TableSource) Reset() {
 	tsrc.cursor = -1
 }
 
-// values calculates the values for the metric at the cursor position.
+// getValues calculates the values for the metric at the cursor position.
 // If the metric cannot be emitted, such as due to dropped tags, or all fields dropped, the return value is nil.
-func (tsrc *TableSource) values() ([]interface{}, error) {
+func (tsrc *TableSource) getValues() ([]interface{}, error) {
 	metric := tsrc.metrics[tsrc.cursor]
 
 	values := []interface{}{
-		metric.Time(),
+		metric.Time().UTC(),
 	}
 
 	if !tsrc.postgresql.TagsAsForeignKeys {
@@ -347,6 +357,18 @@ func (ttsrc *TagTableSource) Name() string {
 	return ttsrc.TableSource.Name() + ttsrc.postgresql.TagTableSuffix
 }
 
+func (ttsrc *TagTableSource) cacheCheck(tagID int64) bool {
+	// Adding the 2 hashes is good enough. It's not a perfect solution, but given that we're operating in an int64
+	// space, the risk of collision is extremely small.
+	key := ttsrc.tagHashSalt + tagID
+	_, err := ttsrc.postgresql.tagsCache.GetInt(key)
+	return err == nil
+}
+func (ttsrc *TagTableSource) cacheTouch(tagID int64) {
+	key := ttsrc.tagHashSalt + tagID
+	_ = ttsrc.postgresql.tagsCache.SetInt(key, nil, 0)
+}
+
 func (ttsrc *TagTableSource) ColumnNames() []string {
 	cols := ttsrc.TagTableColumns()
 	names := make([]string, len(cols))
@@ -362,14 +384,14 @@ func (ttsrc *TagTableSource) Next() bool {
 			ttsrc.cursorValues = nil
 			return false
 		}
-		ttsrc.cursor += 1
+		ttsrc.cursor++
 
-		if _, err := ttsrc.postgresql.tagsCache.GetInt(ttsrc.tagIDs[ttsrc.cursor]); err == nil {
+		if ttsrc.cacheCheck(ttsrc.tagIDs[ttsrc.cursor]) {
 			// tag ID already inserted
 			continue
 		}
 
-		ttsrc.cursorValues = ttsrc.values()
+		ttsrc.cursorValues = ttsrc.getValues()
 		if ttsrc.cursorValues != nil {
 			return true
 		}
@@ -380,13 +402,13 @@ func (ttsrc *TagTableSource) Reset() {
 	ttsrc.cursor = -1
 }
 
-func (ttsrc *TagTableSource) values() []interface{} {
+func (ttsrc *TagTableSource) getValues() []interface{} {
 	tagID := ttsrc.tagIDs[ttsrc.cursor]
 	tagSet := ttsrc.tagSets[tagID]
 
 	var values []interface{}
 	if !ttsrc.postgresql.TagsAsJsonb {
-		values = make([]interface{}, len(tagSet)+1)
+		values = make([]interface{}, len(ttsrc.TableSource.tagColumns.indices)+1)
 		for _, tag := range tagSet {
 			values[ttsrc.TableSource.tagColumns.indices[tag.Key]+1] = tag.Value // +1 to account for tag_id column
 		}
@@ -405,7 +427,7 @@ func (ttsrc *TagTableSource) Values() ([]interface{}, error) {
 
 func (ttsrc *TagTableSource) UpdateCache() {
 	for _, tagID := range ttsrc.tagIDs {
-		ttsrc.postgresql.tagsCache.SetInt(tagID, nil, 0)
+		ttsrc.cacheTouch(tagID)
 	}
 }
 

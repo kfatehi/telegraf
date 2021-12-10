@@ -1,13 +1,23 @@
 package postgresql
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"flag"
 	"fmt"
+	"math"
+	"math/rand"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/influxdata/toml"
+
+	"github.com/influxdata/telegraf/testutil"
 
 	"github.com/jackc/pgx/v4"
 	"github.com/jackc/pgx/v4/pgxpool"
@@ -15,17 +25,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/influxdata/telegraf"
-	"github.com/influxdata/telegraf/metric"
 	"github.com/influxdata/telegraf/plugins/outputs/postgresql/utils"
 )
-
-func timeout(t *testing.T, dur time.Duration) {
-	timer := time.AfterFunc(dur, func() {
-		t.Errorf("Test timed out after %s", dur)
-		t.FailNow()
-	})
-	t.Cleanup(func() { timer.Stop() })
-}
 
 type Log struct {
 	level  pgx.LogLevel
@@ -34,14 +35,16 @@ type Log struct {
 }
 
 func (l Log) String() string {
-	return fmt.Sprintf("%s: "+l.format, append([]interface{}{l.level}, l.args...)...)
+	// We have to use Errorf() as Sprintf() doesn't allow usage of %w.
+	return fmt.Errorf("%s: "+l.format, append([]interface{}{l.level}, l.args...)...).Error()
 }
 
 // LogAccumulator is a log collector that satisfies telegraf.Logger.
 type LogAccumulator struct {
-	logs []Log
-	cond *sync.Cond
-	tb   testing.TB
+	logs      []Log
+	cond      *sync.Cond
+	tb        testing.TB
+	emitLevel pgx.LogLevel
 }
 
 func NewLogAccumulator(tb testing.TB) *LogAccumulator {
@@ -52,14 +55,29 @@ func NewLogAccumulator(tb testing.TB) *LogAccumulator {
 }
 
 func (la *LogAccumulator) append(level pgx.LogLevel, format string, args []interface{}) {
+	la.tb.Helper()
+
 	la.cond.L.Lock()
 	log := Log{level, format, args}
 	la.logs = append(la.logs, log)
-	s := log.String()
-	la.tb.Helper()
-	la.tb.Log(s)
+
+	if la.emitLevel == 0 || log.level <= la.emitLevel {
+		la.tb.Log(log.String())
+	}
+
 	la.cond.Broadcast()
 	la.cond.L.Unlock()
+}
+
+func (la *LogAccumulator) HasLevel(level pgx.LogLevel) bool {
+	la.cond.L.Lock()
+	defer la.cond.L.Unlock()
+	for _, log := range la.logs {
+		if log.level > 0 && log.level <= level {
+			return true
+		}
+	}
+	return false
 }
 
 func (la *LogAccumulator) WaitLen(n int) []Log {
@@ -184,32 +202,32 @@ func (la *LogAccumulator) Info(args ...interface{}) {
 var ctx = context.Background()
 
 func TestMain(m *testing.M) {
-	// Try and find the server.
-	// Try provided env vars & defaults first.
-	if c, err := pgx.Connect(ctx, ""); err != nil {
-		os.Setenv("PGHOST", "127.0.0.1")
-		os.Setenv("PGUSER", "postgres")
-		// Try the port used in docker-compose.yml first
-		os.Setenv("PGPORT", "5433")
-		if c, err := pgx.Connect(ctx, ""); err != nil {
-			// Fall back to the default port
-			os.Setenv("PGPORT", "5432")
-		} else {
-			c.Close(ctx)
+	flag.Parse()
+	if testing.Short() {
+		os.Exit(m.Run())
+	}
+
+	// Use the integration server if no other PG addr env vars specified.
+	pguri := "postgresql://localhost:5432"
+	for _, varname := range []string{"PGURI", "PGHOST", "PGHOSTADDR", "PGPORT"} {
+		if os.Getenv(varname) != "" {
+			pguri = ""
+			break
 		}
-	} else {
-		c.Close(ctx)
+	}
+	if pguri != "" {
+		_ = os.Setenv("PGURI", pguri)
 	}
 
 	if err := prepareDatabase("telegraf"); err != nil {
-		fmt.Fprintf(os.Stderr, "Error preparing database: %s\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "Error preparing database: %s\n", err)
 		os.Exit(1)
 	}
 	os.Exit(m.Run())
 }
 
 func prepareDatabase(name string) error {
-	db, err := pgx.Connect(ctx, "")
+	db, err := pgx.Connect(ctx, os.Getenv("PGURI"))
 	if err != nil {
 		return err
 	}
@@ -222,32 +240,66 @@ func prepareDatabase(name string) error {
 }
 
 type PostgresqlTest struct {
-	Postgresql
+	*Postgresql
 	Logger *LogAccumulator
 }
 
 func newPostgresqlTest(tb testing.TB) *PostgresqlTest {
+	if testing.Short() {
+		tb.Skipf("skipping integration test in short mode")
+		tb.SkipNow()
+	}
+
 	p := newPostgresql()
+	p.Connection = "database=telegraf"
 	logger := NewLogAccumulator(tb)
 	p.Logger = logger
-	pt := &PostgresqlTest{Postgresql: *p}
+	p.LogLevel = "debug"
+	require.NoError(tb, p.Init())
+	pt := &PostgresqlTest{Postgresql: p}
 	pt.Logger = logger
-	pt.Connection = "database=telegraf"
-	pt.LogLevel = "debug"
+
+	tb.Cleanup(func() {
+		if pt.db != nil {
+			// This will block forever (timeout the test) if not all connections were released (committed/rollbacked).
+			// We can't use pt.db.Stats() because in some cases, pgx releases the connection asynchronously.
+			pt.db.Close()
+		}
+	})
+
 	return pt
+}
+
+// Verify that the documented defaults match the actual defaults.
+//
+// Sample config must be in the format documented in `docs/developers/SAMPLE_CONFIG.md`.
+func TestPostgresqlSampleConfig(t *testing.T) {
+	p1 := newPostgresql()
+	require.NoError(t, p1.Init())
+
+	p2 := newPostgresql()
+	re := regexp.MustCompile(`(?m)^\s*#`)
+	conf := re.ReplaceAllLiteralString(p1.SampleConfig(), "")
+	require.NoError(t, toml.Unmarshal([]byte(conf), p2))
+	require.NoError(t, p2.Init())
+
+	// Can't use assert.Equal() because it dives into unexported fields that contain unequal values.
+	// Serializing to JSON is effective as any differences will be visible in exported fields.
+	p1json, _ := json.Marshal(p1)
+	p2json, _ := json.Marshal(p2)
+	assert.JSONEq(t, string(p1json), string(p2json), "Sample config does not match default config")
 }
 
 func TestPostgresqlConnect(t *testing.T) {
 	p := newPostgresqlTest(t)
 	require.NoError(t, p.Connect())
 	assert.EqualValues(t, 1, p.db.Stat().MaxConns())
-	p.Close()
 
 	p = newPostgresqlTest(t)
 	p.Connection += " pool_max_conns=2"
+	_ = p.Init()
 	require.NoError(t, p.Connect())
 	assert.EqualValues(t, 2, p.db.Stat().MaxConns())
-	p.Close()
 }
 
 func newMetric(
@@ -256,7 +308,7 @@ func newMetric(
 	tags map[string]string,
 	fields map[string]interface{},
 ) telegraf.Metric {
-	return metric.New(t.Name()+suffix, tags, fields, time.Now())
+	return testutil.MustMetric(t.Name()+suffix, tags, fields, time.Now())
 }
 
 type MSS = map[string]string
@@ -309,15 +361,15 @@ func TestWrite_sequential(t *testing.T) {
 	stmtCount := 0
 	for _, log := range p.Logger.Logs() {
 		if strings.Contains(log.String(), "info: PG ") {
-			stmtCount += 1
+			stmtCount++
 		}
 	}
-	assert.Equal(t, 4, stmtCount) // BEGIN, COPY table _a, COPY table _b, COMMIT
+	assert.Equal(t, 6, stmtCount) // BEGIN, SAVEPOINT, COPY table _a, SAVEPOINT, COPY table _b, COMMIT
 }
 
 func TestWrite_concurrent(t *testing.T) {
 	p := newPostgresqlTest(t)
-	p.Connection += " pool_max_conns=3"
+	p.dbConfig.MaxConns = 3
 	require.NoError(t, p.Connect())
 
 	// Write a metric so it creates a table we can lock.
@@ -325,15 +377,15 @@ func TestWrite_concurrent(t *testing.T) {
 		newMetric(t, "_a", MSS{}, MSI{"v": 1}),
 	}
 	require.NoError(t, p.Write(metrics))
-	p.Logger.WaitForCopy(t.Name()+"_a", true)
+	p.Logger.WaitForCopy(t.Name()+"_a", false)
 	// clear so that the WaitForCopy calls below don't pick up this one
 	p.Logger.Clear()
 
 	// Lock the table so that we ensure the writes hangs and the plugin has to open another connection.
 	tx, err := p.db.Begin(ctx)
 	require.NoError(t, err)
-	defer tx.Rollback(ctx)
-	_, err = tx.Exec(ctx, "LOCK TABLE "+utils.QuoteIdent(t.Name()+"_a"))
+	defer tx.Rollback(ctx) //nolint:errcheck
+	_, err = tx.Exec(ctx, "LOCK TABLE "+utils.QuoteIdentifier(t.Name()+"_a"))
 	require.NoError(t, err)
 
 	metrics = []telegraf.Metric{
@@ -350,10 +402,10 @@ func TestWrite_concurrent(t *testing.T) {
 	}
 	require.NoError(t, p.Write(metrics))
 
-	p.Logger.WaitForCopy(t.Name()+"_b", true)
+	p.Logger.WaitForCopy(t.Name()+"_b", false)
 	// release the lock on table _a
-	tx.Rollback(ctx)
-	p.Logger.WaitForCopy(t.Name()+"_a", true)
+	_ = tx.Rollback(ctx)
+	p.Logger.WaitForCopy(t.Name()+"_a", false)
 
 	dumpA := dbTableDump(t, p.db, "_a")
 	dumpB := dbTableDump(t, p.db, "_b")
@@ -405,14 +457,14 @@ func TestWrite_sequentialPermError(t *testing.T) {
 // Test that the bad metric is dropped, and the rest of the batch succeeds.
 func TestWrite_concurrentPermError(t *testing.T) {
 	p := newPostgresqlTest(t)
-	p.Connection += " pool_max_conns=2"
+	p.dbConfig.MaxConns = 2
 	require.NoError(t, p.Connect())
 
 	metrics := []telegraf.Metric{
 		newMetric(t, "_a", MSS{}, MSI{"v": 1}),
 	}
 	require.NoError(t, p.Write(metrics))
-	p.Logger.WaitForCopy(t.Name() + "_a", true)
+	p.Logger.WaitForCopy(t.Name()+"_a", false)
 
 	metrics = []telegraf.Metric{
 		newMetric(t, "_a", MSS{}, MSI{"v": "a"}),
@@ -422,7 +474,7 @@ func TestWrite_concurrentPermError(t *testing.T) {
 	p.Logger.WaitFor(func(l Log) bool {
 		return strings.Contains(l.String(), "write error")
 	}, false)
-	p.Logger.WaitForCopy(t.Name() + "_b", true)
+	p.Logger.WaitForCopy(t.Name()+"_b", false)
 
 	dumpA := dbTableDump(t, p.db, "_a")
 	dumpB := dbTableDump(t, p.db, "_b")
@@ -477,7 +529,7 @@ func TestWrite_sequentialTempError(t *testing.T) {
 // Verify that when using concurrency, errors are not returned, but instead logged and automatically retried
 func TestWrite_concurrentTempError(t *testing.T) {
 	p := newPostgresqlTest(t)
-	p.Connection += " pool_max_conns=2"
+	p.dbConfig.MaxConns = 2
 	require.NoError(t, p.Connect())
 
 	// To avoid a race condition, we need to know when our goroutine has started listening to the log.
@@ -517,7 +569,7 @@ func TestWrite_concurrentTempError(t *testing.T) {
 	}
 	require.NoError(t, p.Write(metrics))
 
-	p.Logger.WaitForCopy(t.Name() + "_a", true)
+	p.Logger.WaitForCopy(t.Name()+"_a", false)
 	dumpA := dbTableDump(t, p.db, "_a")
 	assert.Len(t, dumpA, 1)
 
@@ -537,7 +589,7 @@ func TestWriteTagTable(t *testing.T) {
 	require.NoError(t, p.Connect())
 
 	metrics := []telegraf.Metric{
-		newMetric(t, "", MSS{"tag":"foo"}, MSI{"v": 1}),
+		newMetric(t, "", MSS{"tag": "foo"}, MSI{"v": 1}),
 	}
 	require.NoError(t, p.Write(metrics))
 
@@ -556,7 +608,7 @@ func TestWriteTagTable(t *testing.T) {
 	stmtCount := 0
 	for _, log := range p.Logger.Logs() {
 		if strings.Contains(log.String(), "info: PG ") {
-			stmtCount += 1
+			stmtCount++
 		}
 	}
 	assert.Equal(t, 3, stmtCount) // BEGIN, COPY metrics table, COMMIT
@@ -569,7 +621,7 @@ func TestWrite_tagError(t *testing.T) {
 	require.NoError(t, p.Connect())
 
 	metrics := []telegraf.Metric{
-		newMetric(t, "", MSS{"tag":"foo"}, MSI{"v": 1}),
+		newMetric(t, "", MSS{"tag": "foo"}, MSI{"v": 1}),
 	}
 	require.NoError(t, p.Write(metrics))
 
@@ -578,7 +630,7 @@ func TestWrite_tagError(t *testing.T) {
 	require.NoError(t, err)
 
 	metrics = []telegraf.Metric{
-		newMetric(t, "", MSS{"tag":"foo"}, MSI{"v": 2}),
+		newMetric(t, "", MSS{"tag": "foo"}, MSI{"v": 2}),
 	}
 	require.NoError(t, p.Write(metrics))
 
@@ -596,7 +648,7 @@ func TestWrite_tagError_foreignConstraint(t *testing.T) {
 	require.NoError(t, p.Connect())
 
 	metrics := []telegraf.Metric{
-		newMetric(t, "", MSS{"tag":"foo"}, MSI{"v": 1}),
+		newMetric(t, "", MSS{"tag": "foo"}, MSI{"v": 1}),
 	}
 	require.NoError(t, p.Write(metrics))
 
@@ -605,7 +657,7 @@ func TestWrite_tagError_foreignConstraint(t *testing.T) {
 	require.NoError(t, err)
 
 	metrics = []telegraf.Metric{
-		newMetric(t, "", MSS{"tag":"bar"}, MSI{"v": 2}),
+		newMetric(t, "", MSS{"tag": "bar"}, MSI{"v": 2}),
 	}
 	assert.NoError(t, p.Write(metrics))
 	haveError := false
@@ -620,4 +672,99 @@ func TestWrite_tagError_foreignConstraint(t *testing.T) {
 	dump := dbTableDump(t, p.db, "")
 	require.Len(t, dump, 1)
 	assert.EqualValues(t, 1, dump[0]["v"])
+}
+
+func TestWrite_UnsignedIntegers(t *testing.T) {
+	p := newPostgresqlTest(t)
+	p.UseUint8 = true
+	_ = p.Init()
+	require.NoError(t, p.Connect())
+
+	row := p.db.QueryRow(ctx, "SELECT count(*) FROM pg_extension WHERE extname='uint'")
+	var n int
+	require.NoError(t, row.Scan(&n))
+	if n == 0 {
+		t.Skipf("pguint extension is not installed")
+		t.SkipNow()
+	}
+
+	metrics := []telegraf.Metric{
+		newMetric(t, "", MSS{}, MSI{"v": uint64(math.MaxUint64)}),
+	}
+	require.NoError(t, p.Write(metrics))
+
+	dump := dbTableDump(t, p.db, "")
+
+	if assert.Len(t, dump, 1) {
+		assert.EqualValues(t, uint64(math.MaxUint64), dump[0]["v"])
+	}
+}
+
+// Last ditch effort to find any concurrency issues.
+func TestStressConcurrency(t *testing.T) {
+	metrics := []telegraf.Metric{
+		newMetric(t, "", MSS{"foo": "bar"}, MSI{"a": 1}),
+		newMetric(t, "", MSS{"pop": "tart"}, MSI{"b": 1}),
+		newMetric(t, "", MSS{"foo": "bar", "pop": "tart"}, MSI{"a": 2, "b": 2}),
+		newMetric(t, "_b", MSS{"foo": "bar"}, MSI{"a": 1}),
+	}
+
+	concurrency := 4
+	loops := 100
+
+	pctl := newPostgresqlTest(t)
+	pctl.Logger.emitLevel = pgx.LogLevelWarn
+	require.NoError(t, pctl.Connect())
+
+	for i := 0; i < loops; i++ {
+		var wgStart, wgDone sync.WaitGroup
+		wgStart.Add(concurrency)
+		wgDone.Add(concurrency)
+		for j := 0; j < concurrency; j++ {
+			go func() {
+				mShuf := make([]telegraf.Metric, len(metrics))
+				copy(mShuf, metrics)
+				rand.Shuffle(len(mShuf), func(a, b int) { mShuf[a], mShuf[b] = mShuf[b], mShuf[a] })
+
+				p := newPostgresqlTest(t)
+				p.TagsAsForeignKeys = true
+				p.Logger.emitLevel = pgx.LogLevelWarn
+				p.dbConfig.MaxConns = int32(rand.Intn(3) + 1)
+				require.NoError(t, p.Connect())
+				wgStart.Done()
+				wgStart.Wait()
+
+				err := p.Write(mShuf)
+				assert.NoError(t, err)
+				assert.NoError(t, p.Close())
+				assert.False(t, p.Logger.HasLevel(pgx.LogLevelWarn))
+				wgDone.Done()
+			}()
+		}
+		wgDone.Wait()
+
+		if t.Failed() {
+			break
+		}
+
+		for _, stmt := range []string{
+			"DROP TABLE \"" + t.Name() + "_tag\"",
+			"DROP TABLE \"" + t.Name() + "\"",
+			"DROP TABLE \"" + t.Name() + "_b_tag\"",
+			"DROP TABLE \"" + t.Name() + "_b\"",
+		} {
+			_, err := pctl.db.Exec(ctx, stmt)
+			require.NoError(t, err)
+		}
+	}
+}
+
+func TestReadme(t *testing.T) {
+	f, err := os.Open("README.md")
+	require.NoError(t, err)
+	buf := bytes.NewBuffer(nil)
+	_, _ = buf.ReadFrom(f)
+	_ = f.Close()
+	txt := strings.ReplaceAll(buf.String(), "\r", "") // windows files contain CR
+	assert.Contains(t, txt, (&Postgresql{}).SampleConfig(), "Readme is out of date with sample config")
 }

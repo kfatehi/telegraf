@@ -3,20 +3,13 @@ package utils
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"hash/fnv"
-	"log"
 	"strings"
 	"sync/atomic"
-	"time"
 
 	"github.com/jackc/pgx/v4"
 
 	"github.com/influxdata/telegraf"
-)
-
-const (
-	insertIntoSQLTemplate = "INSERT INTO %s(%s) VALUES(%s)"
 )
 
 func TagListToJSON(tagList []*telegraf.Tag) []byte {
@@ -36,8 +29,8 @@ func FieldListToJSON(fieldList []*telegraf.Field) ([]byte, error) {
 	return json.Marshal(fields)
 }
 
-// QuoteIdent returns a sanitized string safe to use in SQL as an identifier
-func QuoteIdent(name string) string {
+// QuoteIdentifier returns a sanitized string safe to use in SQL as an identifier
+func QuoteIdentifier(name string) string {
 	return pgx.Identifier{name}.Sanitize()
 }
 
@@ -46,79 +39,13 @@ func QuoteLiteral(name string) string {
 	return "'" + strings.Replace(name, "'", "''", -1) + "'"
 }
 
-// FullTableName returns a sanitized table name with it's schema (if supplied)
+// FullTableName returns a sanitized table name with its schema (if supplied)
 func FullTableName(schema, name string) pgx.Identifier {
 	if schema != "" {
 		return pgx.Identifier{schema, name}
 	}
 
 	return pgx.Identifier{name}
-}
-
-// Constants for naming PostgreSQL data types both in
-// their short and long versions.
-const (
-	PgBool                     = "boolean"
-	PgSmallInt                 = "smallint"
-	PgInteger                  = "integer"
-	PgBigInt                   = "bigint"
-	PgReal                     = "real"
-	PgDoublePrecision          = "double precision"
-	PgNumeric                  = "numeric"
-	PgText                     = "text"
-	PgTimestampWithTimeZone    = "timestamp with time zone"
-	PgTimestampWithoutTimeZone = "timestamp without time zone"
-	PgSerial                   = "serial"
-	PgJSONb                    = "jsonb"
-)
-
-// DerivePgDatatype returns the appropriate PostgreSQL data type
-// that could hold the value.
-func DerivePgDatatype(value interface{}) PgDataType {
-	switch value.(type) {
-	case bool:
-		return PgBool
-	case uint64:
-		return PgNumeric
-	case int64, int, uint, uint32:
-		return PgBigInt
-	case int32:
-		return PgInteger
-	case int16, int8:
-		return PgSmallInt
-	case float64:
-		return PgDoublePrecision
-	case float32:
-		return PgReal
-	case string:
-		return PgText
-	case time.Time:
-		return PgTimestampWithTimeZone
-	default:
-		log.Printf("E! Unknown datatype %T(%v)", value, value)
-		return PgText
-	}
-}
-
-// PgTypeCanContain tells you if one PostgreSQL data type can contain
-// the values of another without data loss.
-func PgTypeCanContain(canThis PgDataType, containThis PgDataType) bool {
-	switch canThis {
-	case containThis:
-		return true
-	case PgBigInt:
-		return containThis == PgInteger || containThis == PgSmallInt
-	case PgInteger:
-		return containThis == PgSmallInt
-	case PgDoublePrecision, PgReal: // You can store a real in a double, you just lose precision
-		return containThis == PgReal || containThis == PgBigInt || containThis == PgInteger || containThis == PgSmallInt
-	case PgNumeric:
-		return containThis == PgBigInt || containThis == PgSmallInt || containThis == PgInteger || containThis == PgReal || containThis == PgDoublePrecision
-	case PgTimestampWithTimeZone:
-		return containThis == PgTimestampWithoutTimeZone
-	default:
-		return false
-	}
 }
 
 // pgxLogger makes telegraf.Logger compatible with pgx.Logger
@@ -141,21 +68,6 @@ func (l PGXLogger) Log(_ context.Context, level pgx.LogLevel, msg string, data m
 	}
 }
 
-// GenerateInsert returns a SQL statement to insert values in a table
-// with $X placeholders for the values
-func GenerateInsert(fullSanitizedTableName string, columns []string) string {
-	valuePlaceholders := make([]string, len(columns))
-	quotedColumns := make([]string, len(columns))
-	for i, column := range columns {
-		valuePlaceholders[i] = fmt.Sprintf("$%d", i+1)
-		quotedColumns[i] = QuoteIdent(column)
-	}
-
-	columnNames := strings.Join(quotedColumns, ",")
-	values := strings.Join(valuePlaceholders, ",")
-	return fmt.Sprintf(insertIntoSQLTemplate, fullSanitizedTableName, columnNames, values)
-}
-
 func GetTagID(metric telegraf.Metric) int64 {
 	hash := fnv.New64a()
 	for _, tag := range metric.TagList() {
@@ -171,8 +83,9 @@ func GetTagID(metric telegraf.Metric) int64 {
 // WaitGroup is similar to sync.WaitGroup, but allows interruptable waiting (e.g. a timeout).
 type WaitGroup struct {
 	count int32
-	done chan struct{}
+	done  chan struct{}
 }
+
 func NewWaitGroup() *WaitGroup {
 	return &WaitGroup{
 		done: make(chan struct{}),

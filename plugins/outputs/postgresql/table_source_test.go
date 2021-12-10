@@ -2,26 +2,19 @@ package postgresql
 
 import (
 	"encoding/json"
+	"testing"
+	"time"
+
 	"github.com/coocood/freecache"
-	"github.com/influxdata/telegraf"
-	"github.com/influxdata/telegraf/plugins/outputs/postgresql/utils"
 	"github.com/jackc/pgx/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"testing"
-	"time"
+
+	"github.com/influxdata/telegraf"
+	"github.com/influxdata/telegraf/plugins/outputs/postgresql/utils"
 )
 
 func TestTableSource(t *testing.T) {
-}
-
-func indexOfStr(list []string, target string) int {
-	for i, v := range list {
-		if v == target {
-			return i
-		}
-	}
-	return -1
 }
 
 type source interface {
@@ -29,7 +22,7 @@ type source interface {
 	ColumnNames() []string
 }
 
-func tSrcRow(src source) MSI {
+func nextSrcRow(src source) MSI {
 	if !src.Next() {
 		return nil
 	}
@@ -52,8 +45,8 @@ func TestTableSource_tagJSONB(t *testing.T) {
 		newMetric(t, "", MSS{"a": "one", "b": "two"}, MSI{"v": 1}),
 	}
 
-	tsrc := NewTableSources(&p.Postgresql, metrics)[t.Name()]
-	row := tSrcRow(tsrc)
+	tsrc := NewTableSources(p.Postgresql, metrics)[t.Name()]
+	row := nextSrcRow(tsrc)
 	require.NoError(t, tsrc.Err())
 
 	assert.IsType(t, time.Time{}, row["time"])
@@ -66,19 +59,19 @@ func TestTableSource_tagJSONB(t *testing.T) {
 func TestTableSource_tagTable(t *testing.T) {
 	p := newPostgresqlTest(t)
 	p.TagsAsForeignKeys = true
-	p.tagsCache = freecache.NewCache(5*1024*1024)
+	p.tagsCache = freecache.NewCache(5 * 1024 * 1024)
 
 	metrics := []telegraf.Metric{
 		newMetric(t, "", MSS{"a": "one", "b": "two"}, MSI{"v": 1}),
 	}
 
-	tsrc := NewTableSources(&p.Postgresql, metrics)[t.Name()]
+	tsrc := NewTableSources(p.Postgresql, metrics)[t.Name()]
 	ttsrc := NewTagTableSource(tsrc)
-	ttrow := tSrcRow(ttsrc)
+	ttrow := nextSrcRow(ttsrc)
 	assert.EqualValues(t, "one", ttrow["a"])
 	assert.EqualValues(t, "two", ttrow["b"])
 
-	row := tSrcRow(tsrc)
+	row := nextSrcRow(tsrc)
 	assert.Equal(t, row["tag_id"], ttrow["tag_id"])
 }
 
@@ -86,15 +79,15 @@ func TestTableSource_tagTableJSONB(t *testing.T) {
 	p := newPostgresqlTest(t)
 	p.TagsAsForeignKeys = true
 	p.TagsAsJsonb = true
-	p.tagsCache = freecache.NewCache(5*1024*1024)
+	p.tagsCache = freecache.NewCache(5 * 1024 * 1024)
 
 	metrics := []telegraf.Metric{
 		newMetric(t, "", MSS{"a": "one", "b": "two"}, MSI{"v": 1}),
 	}
 
-	tsrc := NewTableSources(&p.Postgresql, metrics)[t.Name()]
+	tsrc := NewTableSources(p.Postgresql, metrics)[t.Name()]
 	ttsrc := NewTagTableSource(tsrc)
-	ttrow := tSrcRow(ttsrc)
+	ttrow := nextSrcRow(ttsrc)
 	var tags MSI
 	require.NoError(t, json.Unmarshal(ttrow["tags"].([]byte), &tags))
 	assert.EqualValues(t, MSI{"a": "one", "b": "two"}, tags)
@@ -108,8 +101,8 @@ func TestTableSource_fieldsJSONB(t *testing.T) {
 		newMetric(t, "", MSS{"tag": "foo"}, MSI{"a": 1, "b": 2}),
 	}
 
-	tsrc := NewTableSources(&p.Postgresql, metrics)[t.Name()]
-	row := tSrcRow(tsrc)
+	tsrc := NewTableSources(p.Postgresql, metrics)[t.Name()]
+	row := nextSrcRow(tsrc)
 	var fields MSI
 	require.NoError(t, json.Unmarshal(row["fields"].([]byte), &fields))
 	// json unmarshals numbers as floats
@@ -125,7 +118,7 @@ func TestTableSource_DropColumn_tag(t *testing.T) {
 		newMetric(t, "", MSS{"a": "one", "b": "two"}, MSI{"v": 1}),
 		newMetric(t, "", MSS{"a": "one"}, MSI{"v": 2}),
 	}
-	tsrc := NewTableSources(&p.Postgresql, metrics)[t.Name()]
+	tsrc := NewTableSources(p.Postgresql, metrics)[t.Name()]
 
 	// Drop column "b"
 	var col utils.Column
@@ -135,9 +128,9 @@ func TestTableSource_DropColumn_tag(t *testing.T) {
 			break
 		}
 	}
-	tsrc.DropColumn(col)
+	_ = tsrc.DropColumn(col)
 
-	row := tSrcRow(tsrc)
+	row := nextSrcRow(tsrc)
 	assert.EqualValues(t, "one", row["a"])
 	assert.EqualValues(t, 2, row["v"])
 	assert.False(t, tsrc.Next())
@@ -149,13 +142,13 @@ func TestTableSource_DropColumn_tag_fkTrue_fcTrue(t *testing.T) {
 	p := newPostgresqlTest(t)
 	p.TagsAsForeignKeys = true
 	p.ForeignTagConstraint = true
-	p.tagsCache = freecache.NewCache(5*1024*1024)
+	p.tagsCache = freecache.NewCache(5 * 1024 * 1024)
 
 	metrics := []telegraf.Metric{
 		newMetric(t, "", MSS{"a": "one", "b": "two"}, MSI{"v": 1}),
 		newMetric(t, "", MSS{"a": "one"}, MSI{"v": 2}),
 	}
-	tsrc := NewTableSources(&p.Postgresql, metrics)[t.Name()]
+	tsrc := NewTableSources(p.Postgresql, metrics)[t.Name()]
 
 	// Drop column "b"
 	var col utils.Column
@@ -165,14 +158,14 @@ func TestTableSource_DropColumn_tag_fkTrue_fcTrue(t *testing.T) {
 			break
 		}
 	}
-	tsrc.DropColumn(col)
+	_ = tsrc.DropColumn(col)
 
 	ttsrc := NewTagTableSource(tsrc)
-	row := tSrcRow(ttsrc)
+	row := nextSrcRow(ttsrc)
 	assert.EqualValues(t, "one", row["a"])
 	assert.False(t, ttsrc.Next())
 
-	row = tSrcRow(tsrc)
+	row = nextSrcRow(tsrc)
 	assert.EqualValues(t, 2, row["v"])
 	assert.False(t, tsrc.Next())
 }
@@ -183,13 +176,13 @@ func TestTableSource_DropColumn_tag_fkTrue_fcFalse(t *testing.T) {
 	p := newPostgresqlTest(t)
 	p.TagsAsForeignKeys = true
 	p.ForeignTagConstraint = false
-	p.tagsCache = freecache.NewCache(5*1024*1024)
+	p.tagsCache = freecache.NewCache(5 * 1024 * 1024)
 
 	metrics := []telegraf.Metric{
 		newMetric(t, "", MSS{"a": "one", "b": "two"}, MSI{"v": 1}),
 		newMetric(t, "", MSS{"a": "one"}, MSI{"v": 2}),
 	}
-	tsrc := NewTableSources(&p.Postgresql, metrics)[t.Name()]
+	tsrc := NewTableSources(p.Postgresql, metrics)[t.Name()]
 
 	// Drop column "b"
 	var col utils.Column
@@ -199,16 +192,16 @@ func TestTableSource_DropColumn_tag_fkTrue_fcFalse(t *testing.T) {
 			break
 		}
 	}
-	tsrc.DropColumn(col)
+	_ = tsrc.DropColumn(col)
 
 	ttsrc := NewTagTableSource(tsrc)
-	row := tSrcRow(ttsrc)
+	row := nextSrcRow(ttsrc)
 	assert.EqualValues(t, "one", row["a"])
 	assert.False(t, ttsrc.Next())
 
-	row = tSrcRow(tsrc)
+	row = nextSrcRow(tsrc)
 	assert.EqualValues(t, 1, row["v"])
-	row = tSrcRow(tsrc)
+	row = nextSrcRow(tsrc)
 	assert.EqualValues(t, 2, row["v"])
 }
 
@@ -220,7 +213,7 @@ func TestTableSource_DropColumn_field(t *testing.T) {
 		newMetric(t, "", MSS{"tag": "foo"}, MSI{"a": 1}),
 		newMetric(t, "", MSS{"tag": "foo"}, MSI{"a": 2, "b": 3}),
 	}
-	tsrc := NewTableSources(&p.Postgresql, metrics)[t.Name()]
+	tsrc := NewTableSources(p.Postgresql, metrics)[t.Name()]
 
 	// Drop column "a"
 	var col utils.Column
@@ -230,10 +223,55 @@ func TestTableSource_DropColumn_field(t *testing.T) {
 			break
 		}
 	}
-	tsrc.DropColumn(col)
+	_ = tsrc.DropColumn(col)
 
-	row := tSrcRow(tsrc)
+	row := nextSrcRow(tsrc)
 	assert.EqualValues(t, "foo", row["tag"])
 	assert.EqualValues(t, 3, row["b"])
 	assert.False(t, tsrc.Next())
+}
+
+func TestTableSource_InconsistentTags(t *testing.T) {
+	p := newPostgresqlTest(t)
+
+	metrics := []telegraf.Metric{
+		newMetric(t, "", MSS{"a": "1"}, MSI{"b": 2}),
+		newMetric(t, "", MSS{"c": "3"}, MSI{"d": 4}),
+	}
+	tsrc := NewTableSources(p.Postgresql, metrics)[t.Name()]
+
+	trow := nextSrcRow(tsrc)
+	assert.EqualValues(t, "1", trow["a"])
+	assert.EqualValues(t, nil, trow["c"])
+
+	trow = nextSrcRow(tsrc)
+	assert.EqualValues(t, nil, trow["a"])
+	assert.EqualValues(t, "3", trow["c"])
+}
+
+func TestTagTableSource_InconsistentTags(t *testing.T) {
+	p := newPostgresqlTest(t)
+	p.TagsAsForeignKeys = true
+	p.tagsCache = freecache.NewCache(5 * 1024 * 1024)
+
+	metrics := []telegraf.Metric{
+		newMetric(t, "", MSS{"a": "1"}, MSI{"b": 2}),
+		newMetric(t, "", MSS{"c": "3"}, MSI{"d": 4}),
+	}
+	tsrc := NewTableSources(p.Postgresql, metrics)[t.Name()]
+	ttsrc := NewTagTableSource(tsrc)
+
+	// ttsrc is in non-deterministic order
+	expected := []MSI{
+		{"a": "1", "c": nil},
+		{"a": nil, "c": "3"},
+	}
+
+	var actual []MSI
+	for row := nextSrcRow(ttsrc); row != nil; row = nextSrcRow(ttsrc) {
+		delete(row, "tag_id")
+		actual = append(actual, row)
+	}
+
+	assert.ElementsMatch(t, expected, actual)
 }
