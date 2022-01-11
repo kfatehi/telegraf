@@ -211,7 +211,6 @@ func importMetric(stat []byte, acc telegraf.Accumulator) error {
 				}
 				fields := map[string]interface{}{
 					"concurrency":           process.Concurrency,
-					"sessions":              process.Sessions,
 					"busyness":              process.Busyness,
 					"processed":             process.Processed,
 					"spawner_creation_time": process.SpawnerCreationTime,
