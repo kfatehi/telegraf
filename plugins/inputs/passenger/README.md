@@ -40,6 +40,17 @@ manage your series cardinality:
 
 Telegraf must have permission to execute the `passenger-status` command.  On most systems, Telegraf runs as the `telegraf` user.
 
+#### sudo technique
+
+You can permit telegraf to call it using the sudoer file with a definition like this:
+
+```
+telegraf ALL = (root) NOPASSWD: /opt/ruby-2.3.8/bin/passenger-status -v --show=xml
+```
+
+And then update the `command` block to invoke it with sudo
+
+
 ## Metrics
 
 - passenger
