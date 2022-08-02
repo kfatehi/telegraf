@@ -104,6 +104,7 @@ func TestPassengerGenerateMetric(t *testing.T) {
 		"max":                23,
 		"capacity_used":      23,
 		"get_wait_list_size": 3,
+		"total_sessions": 1,
 	}
 	acc.AssertContainsTaggedFields(t, "passenger", fields, tags)
 
@@ -137,10 +138,10 @@ func TestPassengerGenerateMetric(t *testing.T) {
 		"code_revision":    "899ac7f",
 		"life_status":      "ALIVE",
 		"process_group_id": "13608",
+		"sessions": "0",
 	}
 	fields = map[string]interface{}{
 		"concurrency":           1,
-		"sessions":              0,
 		"busyness":              0,
 		"processed":             951,
 		"spawner_creation_time": int64(1452746835922747),
