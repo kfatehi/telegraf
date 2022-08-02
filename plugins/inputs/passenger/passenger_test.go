@@ -138,9 +138,10 @@ func TestPassengerGenerateMetric(t *testing.T) {
 		"code_revision":    "899ac7f",
 		"life_status":      "ALIVE",
 		"process_group_id": "13608",
-		"sessions": "0",
+		"sessions_as_tag": "0",
 	}
 	fields = map[string]interface{}{
+    "sessions": 0,
 		"concurrency":           1,
 		"busyness":              0,
 		"processed":             951,

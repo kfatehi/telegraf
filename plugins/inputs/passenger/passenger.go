@@ -207,9 +207,10 @@ func importMetric(stat []byte, acc telegraf.Accumulator) error {
 					"code_revision":    process.CodeRevision,
 					"life_status":      process.LifeStatus,
 					"process_group_id": process.ProcessGroupID,
-					"sessions":         strconv.Itoa(process.Sessions),
+					"sessions_as_tag":         strconv.Itoa(process.Sessions),
 				}
 				fields := map[string]interface{}{
+          "sessions":             process.Sessions,
 					"concurrency":           process.Concurrency,
 					"busyness":              process.Busyness,
 					"processed":             process.Processed,
